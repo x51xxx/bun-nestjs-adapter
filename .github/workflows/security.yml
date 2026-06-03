@@ -58,7 +58,7 @@ jobs:
           args: --severity-threshold=high --sarif-file-output=snyk.sarif
       - name: Upload Snyk SARIF to GitHub Security
         if: env.SNYK_TOKEN != '' && hashFiles('snyk.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: snyk.sarif
       - name: Skip notice
@@ -83,10 +83,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@v4
         with:
           languages: javascript-typescript
           queries: security-and-quality
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@v4
         with:
           category: '/language:javascript-typescript'
