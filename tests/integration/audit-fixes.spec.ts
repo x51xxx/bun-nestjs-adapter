@@ -10,6 +10,7 @@
  *     `/static`).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import {
   Body,
@@ -17,6 +18,9 @@ import {
   Get,
   Module,
   Post,
+  Render,
+  Req,
+  Res,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
@@ -415,5 +419,257 @@ describe('shared port websockets', () => {
     } finally {
       await app.close();
     }
+  });
+});
+
+// ───── view engine support ──────────────────────────────────────────────────
+@Controller('views')
+class ViewsController {
+  @Get('ejs')
+  @Render('hello')
+  renderEjs() {
+    return { name: 'EJS World' };
+  }
+
+  @Get('pug')
+  @Render('hello')
+  renderPug() {
+    return { name: 'Pug World' };
+  }
+
+  @Get('hbs')
+  @Render('hello')
+  renderHbs() {
+    return { name: 'Hbs World' };
+  }
+}
+
+@Module({ controllers: [ViewsController] })
+class ViewsModule {}
+
+describe('view engine support', () => {
+  let app: any;
+  let baseUrl: string;
+  const tempViewsDir = join(import.meta.dir, 'fixtures', 'own', 'temp_views');
+
+  beforeAll(async () => {
+    await fs.mkdir(tempViewsDir, { recursive: true });
+    await fs.writeFile(join(tempViewsDir, 'hello.ejs'), '<h1>Hello <%= name %></h1>');
+    await fs.writeFile(join(tempViewsDir, 'hello.pug'), 'h1 Hello #{name}');
+    await fs.writeFile(join(tempViewsDir, 'hello.hbs'), '<h1>Hello {{name}}</h1>');
+  });
+
+  afterAll(async () => {
+    await fs.rm(tempViewsDir, { recursive: true, force: true });
+  });
+
+  const setupApp = async (engine: string) => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [ViewsModule],
+    }).compile();
+    const adapter = new BunHttpAdapter();
+    adapter.setViewEngine(engine);
+    adapter.setBaseViewsDir(tempViewsDir);
+
+    app = moduleRef.createNestApplication(adapter, { logger: false });
+    await app.init();
+    await app.listen(0, '127.0.0.1');
+    const addr = app.getHttpServer().address();
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+  };
+
+  it('renders EJS template correctly', async () => {
+    await setupApp('ejs');
+    try {
+      const res = await fetch(`${baseUrl}/views/ejs`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('text/html');
+      expect(await res.text()).toBe('<h1>Hello EJS World</h1>');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('renders Pug template correctly', async () => {
+    await setupApp('pug');
+    try {
+      const res = await fetch(`${baseUrl}/views/pug`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('text/html');
+      expect(await res.text()).toBe('<h1>Hello Pug World</h1>');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('renders Handlebars template correctly', async () => {
+    await setupApp('hbs');
+    try {
+      const res = await fetch(`${baseUrl}/views/hbs`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('text/html');
+      expect(await res.text()).toBe('<h1>Hello Hbs World</h1>');
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+// ───── cookies support ──────────────────────────────────────────────────────
+@Controller('cookies')
+class CookiesController {
+  @Get('set')
+  setCookies(@Res() res: any) {
+    res
+      .cookie('plain', 'hello', { path: '/' })
+      .cookie('signed_cookie', 'secret_val', { signed: true })
+      .send('ok');
+  }
+
+  @Get('get')
+  getCookies(@Req() req: any) {
+    return {
+      cookies: req.cookies,
+      signedCookies: req.signedCookies,
+    };
+  }
+
+  @Get('clear')
+  clearCookies(@Res() res: any) {
+    res.clearCookie('plain').send('cleared');
+  }
+
+  @Get('set-obj')
+  setObjCookie(@Res() res: any) {
+    res.cookie('prefs', { theme: 'dark', n: 1 }).send('ok');
+  }
+}
+
+@Module({ controllers: [CookiesController] })
+class CookiesModule {}
+
+describe('cookies support', () => {
+  let app: any;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [CookiesModule],
+    }).compile();
+    const adapter = new BunHttpAdapter();
+    adapter.enableCookieParser('my-secret-key');
+    app = moduleRef.createNestApplication(adapter, { logger: false });
+    await app.init();
+    await app.listen(0, '127.0.0.1');
+    const addr = app.getHttpServer().address();
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('sets cookies (including signed cookies) in response', async () => {
+    const res = await fetch(`${baseUrl}/cookies/set`);
+    expect(res.status).toBe(200);
+    const setCookieHeaders = res.headers.getSetCookie();
+
+    const plainCookie = setCookieHeaders.find(c => c.startsWith('plain='));
+    expect(plainCookie).toBeDefined();
+    expect(plainCookie).toContain('plain=hello');
+    expect(plainCookie).toContain('Path=/');
+
+    const signedCookie = setCookieHeaders.find(c => c.startsWith('signed_cookie='));
+    expect(signedCookie).toBeDefined();
+    expect(signedCookie).toContain('signed_cookie=s%3Asecret_val.');
+  });
+
+  it('parses incoming cookies and signed cookies', async () => {
+    const setRes = await fetch(`${baseUrl}/cookies/set`);
+    const setCookies = setRes.headers.getSetCookie();
+    const cookieHeaderVal = setCookies.map(c => c.split(';')[0]).join('; ');
+
+    const getRes = await fetch(`${baseUrl}/cookies/get`, {
+      headers: {
+        Cookie: cookieHeaderVal,
+      },
+    });
+    expect(getRes.status).toBe(200);
+    const json = await getRes.json();
+    expect(json.cookies.plain).toBe('hello');
+    expect(json.signedCookies.signed_cookie).toBe('secret_val');
+  });
+
+  it('round-trips object cookies via the j: prefix', async () => {
+    const setRes = await fetch(`${baseUrl}/cookies/set-obj`);
+    const cookieHeaderVal = setRes.headers
+      .getSetCookie()
+      .map(c => c.split(';')[0])
+      .join('; ');
+
+    const getRes = await fetch(`${baseUrl}/cookies/get`, {
+      headers: { Cookie: cookieHeaderVal },
+    });
+    const json = await getRes.json();
+    expect(json.cookies.prefs).toEqual({ theme: 'dark', n: 1 });
+  });
+
+  it('clears cookies correctly', async () => {
+    const res = await fetch(`${baseUrl}/cookies/clear`);
+    expect(res.status).toBe(200);
+    const setCookies = res.headers.getSetCookie();
+    const plainCookie = setCookies.find(c => c.startsWith('plain='));
+    expect(plainCookie).toBeDefined();
+    expect(plainCookie).toContain('Max-Age=0');
+    expect(plainCookie).toContain('Expires=');
+  });
+});
+
+// ───── unix domain socket binding support ────────────────────────────────────
+describe('unix domain socket binding support', () => {
+  let app: any;
+  const sockPath = join(process.cwd(), 'test-app.sock');
+
+  beforeAll(async () => {
+    try {
+      await fs.unlink(sockPath);
+    } catch {}
+  });
+
+  afterAll(async () => {
+    try {
+      await fs.unlink(sockPath);
+    } catch {}
+  });
+
+  it('listens and handles requests on a unix domain socket', async () => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [HelloModule],
+    }).compile();
+    app = moduleRef.createNestApplication(new BunHttpAdapter(), {
+      logger: false,
+    });
+    await app.init();
+    await app.listen(sockPath);
+
+    const addr = app.getHttpServer().address();
+    expect(addr).toBe(sockPath);
+
+    const res = await fetch('http://localhost/', {
+      unix: sockPath,
+    } as any);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('hi');
+
+    await app.close();
+
+    let fileExists = true;
+    try {
+      await fs.stat(sockPath);
+    } catch {
+      fileExists = false;
+    }
+    expect(fileExists).toBe(false);
   });
 });

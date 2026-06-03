@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from 'crypto';
 import { EventEmitter } from 'events';
 import { promises as fs } from 'fs';
 import { extname, join, normalize, sep } from 'path';
@@ -25,6 +26,8 @@ export interface BunRequest {
   query: Record<string, string | string[]>;
   body: any;
   rawBody?: Buffer;
+  cookies?: Record<string, any>;
+  signedCookies?: Record<string, any>;
   /** Reference to the underlying Web `Request` object. */
   bunRequest: Request;
   get(name: string): string | undefined;
@@ -56,11 +59,34 @@ export interface BunResponse {
   header(name: string, value?: string): BunResponse;
   get(name: string): string | undefined;
   type(contentType: string): BunResponse;
+  cookie(name: string, value: string, options?: any): BunResponse;
+  clearCookie(name: string, options?: any): BunResponse;
 }
 
 function toResponseInit(headers: BunResponseHeaders, status: number) {
-  // Bun.serve handles plain objects + arrays natively; no Headers needed.
-  return { status, headers: headers as any };
+  // If there are no array values (like set-cookie), we can pass the plain object to avoid allocations.
+  let hasArray = false;
+  for (const key in headers) {
+    if (Array.isArray(headers[key])) {
+      hasArray = true;
+      break;
+    }
+  }
+  if (!hasArray) {
+    return { status, headers: headers as any };
+  }
+
+  const initHeaders = new Headers();
+  for (const [key, value] of Object.entries(headers)) {
+    if (Array.isArray(value)) {
+      for (const val of value) {
+        initHeaders.append(key, val);
+      }
+    } else {
+      initHeaders.set(key, value);
+    }
+  }
+  return { status, headers: initHeaders };
 }
 
 // Pre-allocated frozen empty maps — reused across requests that don't have
@@ -189,6 +215,7 @@ class BunHttpServer extends EventEmitter {
   private bunServer: any = null;
   private boundPort = 0;
   private boundHost = '127.0.0.1';
+  private boundUnixPath: string | null = null;
   /** Optional native Bun routes config built by the adapter at listen-time. */
   public routes: any = undefined;
 
@@ -209,7 +236,6 @@ class BunHttpServer extends EventEmitter {
     const hostname = typeof hostnameOrCb === 'string' ? hostnameOrCb : '0.0.0.0';
     const cb = typeof hostnameOrCb === 'function' ? hostnameOrCb : maybeCb;
     try {
-      const portNumber = Number(port);
       const ServeFn = (globalThis as any).Bun?.serve;
       if (!ServeFn) {
         const err = new Error(
@@ -219,9 +245,10 @@ class BunHttpServer extends EventEmitter {
         if (cb) (cb as any).call(this, err);
         return this;
       }
+      const isUnixSocket =
+        typeof port === 'string' && (port.includes('/') || port.endsWith('.sock'));
+
       const config: any = {
-        port: portNumber,
-        hostname,
         fetch: this.fetchHandler,
         websocket: {
           open: (ws: any) => {
@@ -253,10 +280,21 @@ class BunHttpServer extends EventEmitter {
           return new Response('Internal Server Error', { status: 500 });
         },
       };
+
+      if (isUnixSocket) {
+        config.unix = port;
+        this.boundUnixPath = port;
+      } else {
+        config.port = Number(port);
+        config.hostname = hostname;
+      }
+
       if (this.routes) config.routes = this.routes;
       this.bunServer = ServeFn(config);
-      this.boundPort = this.bunServer.port;
-      this.boundHost = this.bunServer.hostname || hostname;
+      if (!isUnixSocket) {
+        this.boundPort = this.bunServer.port;
+        this.boundHost = this.bunServer.hostname || hostname;
+      }
       this.listening = true;
       if (cb) (cb as any).call(this);
       this.emit('listening');
@@ -269,6 +307,9 @@ class BunHttpServer extends EventEmitter {
 
   address() {
     if (!this.listening) return null;
+    if (this.boundUnixPath) {
+      return this.boundUnixPath;
+    }
     return {
       port: this.boundPort,
       address: this.boundHost,
@@ -277,13 +318,25 @@ class BunHttpServer extends EventEmitter {
   }
 
   close(cb?: (err?: Error) => void) {
-    try {
-      this.bunServer?.stop();
+    const done = (err?: Error) => {
       this.listening = false;
       this.emit('close');
-      if (cb) cb();
+      if (cb) cb(err);
+    };
+
+    try {
+      this.bunServer?.stop();
+      if (this.boundUnixPath) {
+        fs.unlink(this.boundUnixPath)
+          .then(() => done())
+          // The socket file already being gone (e.g. removed by Bun on stop,
+          // or never created) is a successful teardown, not an error.
+          .catch(err => done(err?.code === 'ENOENT' ? undefined : err));
+      } else {
+        done();
+      }
     } catch (err) {
-      if (cb) cb(err as Error);
+      done(err as Error);
     }
     return this;
   }
@@ -316,6 +369,9 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
   private readonly router = new BunRouterInstance();
   private readonly staticAssets: StaticEntry[] = [];
   public readonly wsPaths = new Map<string, any>();
+  private viewEngine: string | null = null;
+  private viewsDir = join(process.cwd(), 'views');
+  public cookieSecret: string | null = null;
 
   constructor() {
     super(undefined);
@@ -624,8 +680,45 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     );
   }
 
-  public render(_response: BunResponse, _view: string, _options: any) {
-    throw new Error('platform-bun: render() is not implemented');
+  public render(response: BunResponse, view: string, options: any) {
+    if (!this.viewEngine) {
+      throw new Error(
+        'platform-bun: View engine is not configured. Call setViewEngine() first.',
+      );
+    }
+    const ext = extname(view) ? '' : `.${this.viewEngine}`;
+    const filePath = join(this.viewsDir, `${view}${ext}`);
+    this.renderTemplate(filePath, options)
+      .then(html => {
+        response.headers['content-type'] = 'text/html; charset=utf-8';
+        this.reply(response, html);
+      })
+      .catch(err => {
+        response._reject(err);
+      });
+  }
+
+  private async renderTemplate(filePath: string, options: any): Promise<string> {
+    const ext = extname(filePath).toLowerCase();
+    const template = await fs.readFile(filePath, 'utf8');
+
+    if (this.viewEngine === 'ejs' || ext === '.ejs') {
+      const ejsModule = await import('ejs' as any);
+      const ejs = ejsModule.default || ejsModule;
+      return ejs.render(template, options, { filename: filePath });
+    }
+    if (this.viewEngine === 'hbs' || this.viewEngine === 'handlebars' || ext === '.hbs') {
+      const hbs = await import('handlebars' as any);
+      const compiled = hbs.compile(template);
+      return compiled(options);
+    }
+    if (this.viewEngine === 'pug' || ext === '.pug') {
+      const pug = await import('pug' as any);
+      const compiled = pug.compile(template, { filename: filePath });
+      return compiled(options);
+    }
+
+    throw new Error(`platform-bun: Unsupported view engine "${this.viewEngine}"`);
   }
 
   public redirect(response: BunResponse, statusCode: number, url: string) {
@@ -686,8 +779,14 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     });
   }
 
-  public setViewEngine(_engine: string) {
-    throw new Error('platform-bun: setViewEngine() is not implemented');
+  public setViewEngine(engine: string) {
+    this.viewEngine = engine;
+    return this;
+  }
+
+  public setBaseViewsDir(path: string | string[]) {
+    this.viewsDir = Array.isArray(path) ? path[0] : path;
+    return this;
   }
 
   public registerParserMiddleware(_prefix?: string, rawBody?: boolean) {
@@ -697,6 +796,11 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
 
   public enableCors(options?: any, _prefix?: string) {
     this.corsOptions = options ?? {};
+  }
+
+  public enableCookieParser(secret?: string) {
+    this.cookieSecret = secret || null;
+    return this;
   }
 
   public createMiddlewareFactory(_requestMethod: RequestMethod) {
@@ -978,6 +1082,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       });
     }
 
+    const parsedCookies = parseCookies(headers['cookie'], this.cookieSecret);
     const req: any = {
       method,
       url: fullPath,
@@ -989,6 +1094,8 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       headers,
       params,
       query,
+      cookies: parsedCookies.cookies,
+      signedCookies: parsedCookies.signedCookies,
       get body() {
         return ensureBody();
       },
@@ -1339,6 +1446,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     const hostname = hostHeader ? hostHeader.split(':', 1)[0] : '';
     const fullPath = hasQuery ? rawUrl.slice(rawUrl.indexOf(pathname)) : pathname;
 
+    const parsedCookies = parseCookies(headers['cookie'], this.cookieSecret);
     const req: BunRequest = {
       method,
       url: fullPath,
@@ -1352,6 +1460,8 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       query,
       body,
       rawBody,
+      cookies: parsedCookies.cookies,
+      signedCookies: parsedCookies.signedCookies,
       bunRequest: raw,
       get(name: string) {
         return this.headers[name.toLowerCase()];
@@ -1524,6 +1634,34 @@ function makeBunResponse(
     type(contentType: string) {
       this.headers['content-type'] = contentType;
       return this;
+    },
+    cookie(name: string, value: string, options: any = {}) {
+      let val = typeof value === 'object' ? 'j:' + JSON.stringify(value) : String(value);
+      if (options.signed && adapter.cookieSecret) {
+        val = signCookie(val, adapter.cookieSecret);
+      }
+
+      const parts = [`${encodeURIComponent(name)}=${encodeURIComponent(val)}`];
+      if (options.maxAge !== undefined) {
+        parts.push(`Max-Age=${Math.floor(options.maxAge / 1000)}`);
+      }
+      if (options.domain) parts.push(`Domain=${options.domain}`);
+      if (options.path) parts.push(`Path=${options.path}`);
+      else parts.push('Path=/');
+      if (options.expires) parts.push(`Expires=${options.expires.toUTCString()}`);
+      if (options.httpOnly) parts.push('HttpOnly');
+      if (options.secure) parts.push('Secure');
+      if (options.sameSite) {
+        const ss = options.sameSite === true ? 'strict' : options.sameSite.toLowerCase();
+        parts.push(`SameSite=${ss.charAt(0).toUpperCase() + ss.slice(1)}`);
+      }
+
+      adapter.appendHeader(this, 'Set-Cookie', parts.join('; '));
+      return this;
+    },
+    clearCookie(name: string, options: any = {}) {
+      const opts = { ...options, expires: new Date(1), maxAge: 0 };
+      return this.cookie(name, '', opts);
     },
   };
   attachWritableShim(res, resolve);
@@ -1752,3 +1890,79 @@ const STATIC_MIME: Record<string, string> = {
   '.ico': 'image/x-icon',
   '.wasm': 'application/wasm',
 };
+
+function signCookie(val: string, secret: string): string {
+  const signature = createHmac('sha256', secret)
+    .update(val)
+    .digest('base64')
+    .replace(/=+$/, '');
+  return `s:${val}.${signature}`;
+}
+
+function unsignCookie(val: string, secret: string): string | false {
+  if (!val.startsWith('s:')) return false;
+  const index = val.lastIndexOf('.');
+  if (index === -1) return false;
+  const actualVal = val.slice(2, index);
+  const sig = val.slice(index + 1);
+  const expectedSig = createHmac('sha256', secret)
+    .update(actualVal)
+    .digest('base64')
+    .replace(/=+$/, '');
+
+  // Constant-time compare — `timingSafeEqual` throws on unequal lengths, so
+  // guard on length first (a length mismatch is already a definitive reject).
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expectedSig);
+  if (a.length === b.length && timingSafeEqual(a, b)) return actualVal;
+  return false;
+}
+
+// Mirror Express' JSONCookie: a `j:`-prefixed value was written by `res.cookie`
+// with an object payload, so decode it back on read.
+function decodeCookieValue(val: string): any {
+  if (val.startsWith('j:')) {
+    try {
+      return JSON.parse(val.slice(2));
+    } catch {
+      return val;
+    }
+  }
+  return val;
+}
+
+// Shared frozen result reused for cookie-less requests — same hot-path
+// no-allocation contract as EMPTY_QUERY / EMPTY_PARAMS.
+const EMPTY_COOKIE_MAP: Record<string, any> = Object.freeze(Object.create(null));
+const EMPTY_COOKIES = Object.freeze({
+  cookies: EMPTY_COOKIE_MAP,
+  signedCookies: EMPTY_COOKIE_MAP,
+});
+
+function parseCookies(
+  cookieHeader: string | undefined,
+  secret: string | null,
+): { cookies: Record<string, any>; signedCookies: Record<string, any> } {
+  if (!cookieHeader) return EMPTY_COOKIES;
+
+  const cookies = Object.create(null);
+  const signedCookies = Object.create(null);
+  const pairs = cookieHeader.split(';');
+  for (let i = 0; i < pairs.length; i++) {
+    const pair = pairs[i];
+    const idx = pair.indexOf('=');
+    if (idx === -1) continue;
+    const key = decodeURIComponent(pair.slice(0, idx).trim());
+    const val = decodeURIComponent(pair.slice(idx + 1).trim());
+
+    if (secret && val.startsWith('s:')) {
+      const unsigned = unsignCookie(val, secret);
+      if (unsigned !== false) {
+        signedCookies[key] = decodeCookieValue(unsigned);
+        continue;
+      }
+    }
+    cookies[key] = decodeCookieValue(val);
+  }
+  return { cookies, signedCookies };
+}

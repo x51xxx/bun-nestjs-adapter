@@ -236,9 +236,11 @@ scripts/
 - [~] GraphQL Yoga driver (`BunYogaDriver`) — fetch-native driver prototyped and
       benchmarked (bench-only, ~+40 % RPS vs Apollo on bun); not yet a published
       export.
-- [ ] `setViewEngine` + `render()` (currently throw).
-- [ ] Cookie helper (signed cookies, parser).
-- [ ] Unix-socket binding for inter-process traffic (Bun supports it natively).
+- [x] `setViewEngine` + `render()` — `ejs` / `pug` / `handlebars` via optional
+      peer deps (install the engine you use; not bundled).
+- [x] Cookie helper — `res.cookie` / `res.clearCookie`, signed cookies
+      (`enableCookieParser(secret)`) and `req.cookies` / `req.signedCookies`.
+- [x] Unix-socket binding — `app.listen('/path/to.sock')` (Bun native).
 
 ## Prior art
 

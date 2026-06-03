@@ -22,5 +22,10 @@ export default defineConfig({
     'node:fs',
     'node:path',
     'node:stream',
+    // Optional view-engine peers — dynamically imported by render() and resolved
+    // from the consumer's tree at runtime. Never bundle them into dist/.
+    'ejs',
+    'pug',
+    'handlebars',
   ],
 });
