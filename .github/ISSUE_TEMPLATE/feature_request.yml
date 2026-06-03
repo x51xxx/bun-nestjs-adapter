@@ -1,0 +1,58 @@
+name: ✨ Feature request
+description: Propose a new capability or improvement
+title: '[feat]: '
+labels: ['enhancement', 'triage']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For exploratory ideas please open a [Discussion](https://github.com/USER/bun-nestjs-adapter/discussions)
+        first — issues are reserved for concrete, scoped work.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What real-world use-case is blocked or painful today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed API / behavior
+      description: Show the API you'd like, ideally with a code sample.
+      render: ts
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - HTTP adapter
+        - WebSocket adapter
+        - File uploads / streaming
+        - Build / packaging
+        - Tooling / CI
+        - Documentation
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing issues and discussions for a duplicate
+          required: true
+        - label: I'm willing to help implement this
+          required: false

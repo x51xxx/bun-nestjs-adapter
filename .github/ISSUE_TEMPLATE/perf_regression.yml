@@ -1,0 +1,46 @@
+name: 📉 Performance regression
+description: A workload that used to be fast is now slow
+title: '[perf]: '
+labels: ['performance', 'triage']
+body:
+  - type: input
+    id: baseline-version
+    attributes:
+      label: Last good version
+      placeholder: 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: regressed-version
+    attributes:
+      label: First bad version
+      placeholder: 0.2.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: bench
+    attributes:
+      label: Benchmark output
+      description: |
+        Paste the output of `bun run bench` (or `bench:quick`). If you have a
+        custom workload, include the runner script too.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware / OS
+      placeholder: 'M1 Max, macOS 15.6, Bun 1.3.5'
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Other notes
+    validations:
+      required: false

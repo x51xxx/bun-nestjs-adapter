@@ -1,0 +1,67 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023", "DOM"],
+    "types": ["bun", "node"],
+    "outDir": "dist",
+    "rootDir": "src",
+
+    "strict": true,
+    "strictNullChecks": true,
+    "noImplicitAny": false,
+    "strictPropertyInitialization": false,
+    "useUnknownInCatchVariables": false,
+
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "removeComments": false,
+
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false,
+
+    // Single-source-of-NestJS: redirect every `@nestjs/*` import — from our
+    // src/, our tests/, AND from the upstream fixtures under
+    // fixtures/nestjs-nest/integration/* — to one copy under the submodule's
+    // node_modules. Without this, Bun resolves our test-time imports to our
+    // root node_modules and the fixture AppModules to the submodule's, ending
+    // up with two distinct class identities + Symbol pairs (LazyModuleLoader,
+    // VERSION_NEUTRAL, etc.) that Nest's DI/runtime can't reconcile.
+    //
+    // Build-time impact: tsup keeps `@nestjs/*` in its `external` list, so
+    // dist/ doesn't bundle them — published packages still resolve through
+    // the consumer's own node_modules at runtime. The .d.ts output stays
+    // compatible with the peerDependencies range we publish.
+    "baseUrl": ".",
+    "paths": {
+      "@nestjs/common": ["./fixtures/nestjs-nest/node_modules/@nestjs/common"],
+      "@nestjs/common/*": ["./fixtures/nestjs-nest/node_modules/@nestjs/common/*"],
+      "@nestjs/core": ["./fixtures/nestjs-nest/node_modules/@nestjs/core"],
+      "@nestjs/core/*": ["./fixtures/nestjs-nest/node_modules/@nestjs/core/*"],
+      "@nestjs/testing": ["./fixtures/nestjs-nest/node_modules/@nestjs/testing"],
+      "@nestjs/testing/*": ["./fixtures/nestjs-nest/node_modules/@nestjs/testing/*"],
+      "@nestjs/websockets": ["./fixtures/nestjs-nest/node_modules/@nestjs/websockets"],
+      "@nestjs/websockets/*": [
+        "./fixtures/nestjs-nest/node_modules/@nestjs/websockets/*"
+      ],
+      "@nestjs/platform-express": [
+        "./fixtures/nestjs-nest/node_modules/@nestjs/platform-express"
+      ],
+      "@nestjs/platform-fastify": [
+        "./fixtures/nestjs-nest/node_modules/@nestjs/platform-fastify"
+      ]
+    }
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "tests", "fixtures"]
+}

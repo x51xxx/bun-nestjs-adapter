@@ -1,0 +1,3 @@
+[submodule "fixtures/nestjs-nest"]
+	path = fixtures/nestjs-nest
+	url = https://github.com/nestjs/nest.git

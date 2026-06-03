@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Discussions
+    url: https://github.com/USER/bun-nestjs-adapter/discussions
+    about: Questions, design proposals, performance numbers — start here.
+  - name: 📚 NestJS docs
+    url: https://docs.nestjs.com
+    about: Generic Nest questions belong on the official docs / Discord.
+  - name: 🐰 Bun docs
+    url: https://bun.com/docs
+    about: Bun runtime / API questions belong on the official docs.

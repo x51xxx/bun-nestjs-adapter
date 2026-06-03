@@ -1,0 +1,29 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# fixtures node_modules — keep the source code, drop the build artifacts
+fixtures/*/node_modules/
+fixtures/*/dist/
+fixtures/*/.tsbuildinfo
+fixtures/*/**/*.tsbuildinfo
+
+# bun
+.bun-cache/
+
+# benchmark matrix run artifacts
+.bench-runs/
+
+# IDE
+.idea/
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# changesets
+.changeset/*-*.md

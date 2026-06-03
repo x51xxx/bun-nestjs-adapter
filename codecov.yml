@@ -1,0 +1,33 @@
+coverage:
+  status:
+    project:
+      default:
+        target: 80%
+        threshold: 1%
+        if_ci_failed: error
+    patch:
+      default:
+        target: 70%
+        threshold: 1%
+        if_ci_failed: error
+
+  range: 70..90
+  precision: 1
+  round: down
+
+ignore:
+  - tests/
+  - dist/
+  - fixtures/
+  - tests/bench/
+
+comment:
+  layout: 'reach,diff,flags,files'
+  behavior: default
+  require_changes: false
+
+flags:
+  integration:
+    paths:
+      - src/
+    carryforward: true

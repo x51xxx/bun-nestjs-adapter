@@ -1,0 +1,80 @@
+version: 2
+updates:
+  # ----- npm dependencies (production + dev) -----
+  - package-ecosystem: 'npm'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+      day: 'monday'
+      time: '06:00'
+      timezone: 'Europe/Kyiv'
+    open-pull-requests-limit: 5
+    versioning-strategy: 'increase-if-necessary'
+    commit-message:
+      prefix: 'chore(deps)'
+      prefix-development: 'chore(deps-dev)'
+      include: 'scope'
+    labels:
+      - 'dependencies'
+    groups:
+      # Bundle minor + patch bumps so reviewers see one PR per category.
+      nestjs:
+        patterns:
+          - '@nestjs/*'
+        update-types:
+          - 'minor'
+          - 'patch'
+      tooling:
+        patterns:
+          - 'tsup'
+          - 'typescript'
+          - '@swc/*'
+          - '@biomejs/*'
+          - '@changesets/*'
+          - 'husky'
+          - 'lint-staged'
+          - '@commitlint/*'
+        update-types:
+          - 'minor'
+          - 'patch'
+      types:
+        patterns:
+          - '@types/*'
+        update-types:
+          - 'minor'
+          - 'patch'
+      dev-misc:
+        dependency-type: 'development'
+        update-types:
+          - 'patch'
+    ignore:
+      # Bun ships its own @types/bun via runtime — pin major.
+      - dependency-name: '@types/bun'
+        update-types: ['version-update:semver-major']
+
+  # ----- GitHub Actions versions -----
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+      day: 'monday'
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'chore(ci)'
+      include: 'scope'
+    labels:
+      - 'dependencies'
+      - 'ci'
+
+  # ----- nestjs/nest fixtures submodule (manual updates preferred, but we
+  # still want Dependabot to flag drift weekly) -----
+  - package-ecosystem: 'gitsubmodule'
+    directory: '/'
+    schedule:
+      interval: 'monthly'
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: 'test(fixtures)'
+      include: 'scope'
+    labels:
+      - 'fixtures'
