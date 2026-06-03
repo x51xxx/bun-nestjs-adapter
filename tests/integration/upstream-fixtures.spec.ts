@@ -294,30 +294,27 @@ const lazyModules = skipIfMissing(
 // `app.listen()`. Lazy routes resolve to 404. Unblocks once we wire
 // `server.reload({ routes: rebuild() })` after each lazy load (or fall
 // back to the manual fetch dispatcher whenever LazyModuleLoader is in
-// the module graph).
-lazyModules.describe.skip(
-  'upstream :: lazy-modules (KNOWN: routes frozen at listen)',
-  () => {
-    let ctx: { app: any; baseUrl: string };
-    beforeAll(async () => {
-      const { AppModule } = await import(
-        join(FIXTURES_ROOT, 'lazy-modules', 'src', 'app.module.ts')
-      );
-      ctx = await bootApp(AppModule);
-    });
-    afterAll(async () => ctx.app.close());
+// the module graph). Always skipped → plain `describe.skip`.
+describe.skip('upstream :: lazy-modules (KNOWN: routes frozen at listen)', () => {
+  let ctx: { app: any; baseUrl: string };
+  beforeAll(async () => {
+    const { AppModule } = await import(
+      join(FIXTURES_ROOT, 'lazy-modules', 'src', 'app.module.ts')
+    );
+    ctx = await bootApp(AppModule);
+  });
+  afterAll(async () => ctx.app.close());
 
-    it('lazy-loads a transient module on /lazy/transient', async () => {
-      const res = await fetch(`${ctx.baseUrl}/lazy/transient`);
-      expect(res.status).toBe(200);
-    });
+  it('lazy-loads a transient module on /lazy/transient', async () => {
+    const res = await fetch(`${ctx.baseUrl}/lazy/transient`);
+    expect(res.status).toBe(200);
+  });
 
-    it('lazy-loads a request-scoped module on /lazy/request', async () => {
-      const res = await fetch(`${ctx.baseUrl}/lazy/request`);
-      expect(res.status).toBe(200);
-    });
-  },
-);
+  it('lazy-loads a request-scoped module on /lazy/request', async () => {
+    const res = await fetch(`${ctx.baseUrl}/lazy/request`);
+    expect(res.status).toBe(200);
+  });
+});
 
 // ───── send-files (StreamableFile) ─────────────────────────────────────────
 const sendFiles = skipIfMissing(

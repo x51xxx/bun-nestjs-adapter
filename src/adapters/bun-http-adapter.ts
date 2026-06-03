@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import { promises as fs } from 'fs';
 import { extname, join, normalize, sep } from 'path';
+import { Readable } from 'stream';
 import {
   RequestMethod,
   VERSION_NEUTRAL,
@@ -589,12 +590,14 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
 
   private streamNodeReadable(response: BunResponse, nodeStream: any) {
     let webStream: ReadableStream;
-    // Node 17+ provides Readable.toWeb(); Bun supports it. Fall back to a
-    // manual wrapper if it's missing for some reason.
-    const Readable = (globalThis as any).require?.('stream')?.Readable;
-    if (Readable?.toWeb) {
+    // Use Node's `Readable.toWeb` (statically imported from `node:stream`) — it
+    // handles backpressure and pauses the source until pull, so no data is lost.
+    // The old `globalThis.require('stream')` lookup was unreliable in Bun's ESM
+    // context (undefined on Linux), which silently dropped us into the racy
+    // manual wrapper below and produced empty/500 streamed responses there.
+    if (typeof (Readable as any)?.toWeb === 'function') {
       try {
-        webStream = Readable.toWeb(nodeStream) as ReadableStream;
+        webStream = Readable.toWeb(nodeStream) as unknown as ReadableStream;
       } catch {
         webStream = nodeReadableToWeb(nodeStream);
       }
