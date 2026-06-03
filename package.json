@@ -78,7 +78,7 @@
     "@as-integrations/express5": "^1.1.2",
     "@as-integrations/fastify": "^3.1.0",
     "@biomejs/biome": "^1.9.4",
-    "@casl/ability": "^6.8.1",
+    "@casl/ability": "^7.0.0",
     "@changesets/cli": "^2.27.10",
     "@commitlint/cli": "^21.0.2",
     "@commitlint/config-conventional": "^21.0.2",
