@@ -34,9 +34,32 @@ export interface BunUploadedFile {
   buffer: Buffer;
 }
 
+/** The duck-typed `File`-like entry FormData yields for uploads. */
+interface FormDataFileEntry {
+  arrayBuffer(): Promise<ArrayBuffer>;
+  name: string;
+  type: string;
+}
+
+/** The request fields the interceptors read and populate. */
+interface MultipartRequest {
+  bunRequest?: Request;
+  body?: Record<string, unknown>;
+  file?: BunUploadedFile;
+  files?: BunUploadedFile[];
+}
+
+function isFileEntry(value: unknown): value is FormDataFileEntry {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as Partial<FormDataFileEntry>).arrayBuffer === 'function'
+  );
+}
+
 async function fileFromFormDataEntry(
   fieldname: string,
-  value: { arrayBuffer(): Promise<ArrayBuffer>; name: string; type: string },
+  value: FormDataFileEntry,
 ): Promise<BunUploadedFile> {
   const buffer = Buffer.from(await value.arrayBuffer());
   return {
@@ -49,7 +72,7 @@ async function fileFromFormDataEntry(
 }
 
 async function readFormData(
-  req: any,
+  req: MultipartRequest,
   options?: BunMultipartOptions,
 ): Promise<{
   fields: Record<string, string>;
@@ -70,16 +93,12 @@ async function readFormData(
   for (const [key, value] of fd.entries()) {
     if (typeof value === 'string') {
       fields[key] = value;
-    } else if (
-      typeof value === 'object' &&
-      value !== null &&
-      typeof (value as any).arrayBuffer === 'function'
-    ) {
+    } else if (isFileEntry(value)) {
       totalFiles++;
       if (limits?.files !== undefined && totalFiles > limits.files) {
         throw new BadRequestException(`Too many files (limit: ${limits.files})`);
       }
-      const file = await fileFromFormDataEntry(key, value as any);
+      const file = await fileFromFormDataEntry(key, value);
       if (limits?.fileSize !== undefined && file.size > limits.fileSize) {
         throw new PayloadTooLargeException(
           `File size limit exceeded (limit: ${limits.fileSize} bytes)`,
@@ -113,11 +132,8 @@ export function BunFileInterceptor(
 ): Type<NestInterceptor> {
   @Injectable()
   class MixinInterceptor implements NestInterceptor {
-    intercept(
-      context: ExecutionContext,
-      next: CallHandler,
-    ): Observable<any> | Promise<Observable<any>> {
-      const req = context.switchToHttp().getRequest();
+    intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
+      const req = context.switchToHttp().getRequest<MultipartRequest>();
       return from(readFormData(req, options)).pipe(
         switchMap(({ fields, filesByField }) => {
           req.body = { ...(req.body ?? {}), ...fields };
@@ -144,11 +160,8 @@ export function BunFilesInterceptor(
 ): Type<NestInterceptor> {
   @Injectable()
   class MixinInterceptor implements NestInterceptor {
-    intercept(
-      context: ExecutionContext,
-      next: CallHandler,
-    ): Observable<any> | Promise<Observable<any>> {
-      const req = context.switchToHttp().getRequest();
+    intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
+      const req = context.switchToHttp().getRequest<MultipartRequest>();
       return from(readFormData(req, options)).pipe(
         switchMap(({ fields, filesByField }) => {
           req.body = { ...(req.body ?? {}), ...fields };
@@ -173,11 +186,8 @@ export function BunAnyFilesInterceptor(
 ): Type<NestInterceptor> {
   @Injectable()
   class MixinInterceptor implements NestInterceptor {
-    intercept(
-      context: ExecutionContext,
-      next: CallHandler,
-    ): Observable<any> | Promise<Observable<any>> {
-      const req = context.switchToHttp().getRequest();
+    intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
+      const req = context.switchToHttp().getRequest<MultipartRequest>();
       return from(readFormData(req, options)).pipe(
         switchMap(({ fields, filesByField }) => {
           req.body = { ...(req.body ?? {}), ...fields };

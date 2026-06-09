@@ -42,9 +42,22 @@ Runtime requirement: **Bun ≥ 1.2.0** (engines field says `>=1.2.0`; CI pins `1
 ```
 src/                          # Published source
   adapters/
-    bun-http-adapter.ts       # ~1,600 LOC — main HTTP adapter
-    bun-ws-adapter.ts         # ~310 LOC — WebSocket adapter
+    bun-http-adapter.ts       # ~750 LOC — BunHttpAdapter class (dispatch orchestration only)
+    bun-ws-adapter.ts         # ~400 LOC — WebSocket adapter
     index.ts                  # Re-exports both adapters
+  http/                       # HTTP building blocks used by BunHttpAdapter
+    types.ts                  # BunRequest/BunResponse/Ws*Shim interfaces, shared empty maps
+    router.ts                 # BunRouterInstance, compilePath, toBunRoutePath
+    server.ts                 # BunHttpServer (Bun.serve wrapper, TLS, unix sockets, native routes)
+    request.ts                # request-shim builders, buildHeaders, parseQuery, shared body parser
+    response.ts               # makeBunResponse, writable/SSE shim, toResponseInit
+    cookies.ts                # parse/sign/unsign cookies
+    cors.ts                   # CorsOptions + applyCorsHeaders
+    versioning.ts             # applyVersionFilter (HEADER/MEDIA_TYPE/CUSTOM)
+    views.ts                  # renderTemplate (ejs/hbs/pug, lazy imports)
+    optional-engines.d.ts     # minimal types for untyped optional peers (ejs, pug)
+    static.ts                 # matchStatic/serveStatic, MIME map
+    streaming.ts              # Node Readable → web stream helpers, duck-type guards
   interceptors/
     bun-file-interceptor.ts   # ~160 LOC — file upload interceptors
     index.ts                  # Re-exports interceptors
@@ -61,6 +74,8 @@ tests/
     websocket.spec.ts         # BunWsAdapter gateway tests
     upstream-fixtures.spec.ts # Compatibility suite against upstream nestjs/nest fixtures
     audit-fixes.spec.ts       # Regression / audit tests
+    refactor-fixes.spec.ts    # Regression tests for src/http decomposition fixes
+    https.spec.ts             # httpsOptions → Bun.serve TLS (self-signed cert in fixtures/own/tls)
     fixtures/own/             # Local Nest AppModules for integration tests
       app.module.ts
       cats/
@@ -296,7 +311,8 @@ When fixing any of these, drop `.skip` from the relevant `describe.skip` in `ups
 
 | Task | File(s) |
 |------|---------|
-| HTTP routing, request/response shims, versioning, CORS, static assets | `src/adapters/bun-http-adapter.ts` |
+| HTTP dispatch, versioning, CORS, static assets, views | `src/adapters/bun-http-adapter.ts` |
+| Request/response shims, router, cookies, body parsing, Bun.serve wrapper | `src/http/*.ts` |
 | WebSocket gateway behaviour, pub/sub | `src/adapters/bun-ws-adapter.ts` |
 | File upload interceptors | `src/interceptors/bun-file-interceptor.ts` |
 | Public API surface | `src/index.ts`, `src/adapters/index.ts`, `src/interceptors/index.ts` |
