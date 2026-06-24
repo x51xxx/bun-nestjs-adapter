@@ -1,4 +1,4 @@
-import { promises as fs } from 'fs';
+import { promises as fs, type Stats } from 'fs';
 import { extname, join, normalize, sep } from 'path';
 import { toResponseInit } from './response';
 import { BunRequest, BunResponse } from './types';
@@ -118,6 +118,85 @@ function parseRange(
   return { start, end };
 }
 
+export interface ServeFileOptions {
+  /** `Cache-Control` value to emit. */
+  cacheControl?: string;
+  /** Override the content-type (otherwise derived from the extension). */
+  contentType?: string;
+}
+
+/**
+ * Emit a response for an already-`stat`'d file, applying conditional-request
+ * (`304`), byte-range (`206` / `416`) and caching headers. Shared by static
+ * serving and `res.sendFile` / `res.download`.
+ */
+function emitFile(
+  filePath: string,
+  stat: Stats,
+  res: BunResponse,
+  req?: BunRequest,
+  opts?: ServeFileOptions,
+): void {
+  const size = stat.size;
+  const etag = computeEtag(size, stat.mtimeMs);
+  const ext = extname(filePath).toLowerCase();
+  const mime = opts?.contentType ?? STATIC_MIME[ext] ?? 'application/octet-stream';
+
+  const headers = res.headers;
+  if (headers['content-type'] === undefined) headers['content-type'] = mime;
+  headers['etag'] = etag;
+  headers['last-modified'] = stat.mtime.toUTCString();
+  headers['accept-ranges'] = 'bytes';
+  if (opts?.cacheControl) headers['cache-control'] = opts.cacheControl;
+
+  const reqHeaders = req?.headers;
+  const method = req?.method ?? 'GET';
+
+  // Conditional GET — `If-None-Match` wins over `If-Modified-Since` (RFC 9110).
+  const inm = reqHeaders?.['if-none-match'];
+  const ims = reqHeaders?.['if-modified-since'];
+  const notModified =
+    (inm !== undefined && etagMatches(inm, etag)) ||
+    (inm === undefined &&
+      ims !== undefined &&
+      Number.isFinite(Date.parse(ims)) &&
+      stat.mtime.getTime() <= Date.parse(ims) + 999);
+  if (notModified) {
+    finishEmpty(res, 304);
+    return;
+  }
+
+  const file = Bun.file(filePath);
+
+  // Range request (skip for HEAD — no body to slice).
+  const range = method === 'HEAD' ? null : parseRange(reqHeaders?.['range'], size);
+  if (range === 'invalid') {
+    headers['content-range'] = `bytes */${size}`;
+    finishEmpty(res, 416);
+    return;
+  }
+
+  res.finished = true;
+  res.headersSent = true;
+
+  if (method === 'HEAD') {
+    headers['content-length'] = String(size);
+    res._resolve(new Response(null, toResponseInit(headers, 200)));
+    return;
+  }
+
+  if (range) {
+    const { start, end } = range;
+    headers['content-range'] = `bytes ${start}-${end}/${size}`;
+    headers['content-length'] = String(end - start + 1);
+    res._resolve(new Response(file.slice(start, end + 1), toResponseInit(headers, 206)));
+    return;
+  }
+
+  headers['content-length'] = String(size);
+  res._resolve(new Response(file, toResponseInit(headers, res.statusCode || 200)));
+}
+
 /**
  * Serve a file from a static entry with conditional-request, byte-range and
  * caching support. Returns `true` when the request was handled (file served,
@@ -135,7 +214,7 @@ export async function serveStatic(
     return true;
   }
   const filePath = join(matched.entry.root, safe);
-  let stat: Awaited<ReturnType<typeof fs.stat>>;
+  let stat: Stats;
   try {
     stat = await fs.stat(filePath);
   } catch (err) {
@@ -151,67 +230,34 @@ export async function serveStatic(
     finishEmpty(res, 500);
     return true;
   }
-
-  const size = stat.size;
-  const etag = computeEtag(size, stat.mtimeMs);
-  const lastModified = stat.mtime.toUTCString();
-  const ext = extname(filePath).toLowerCase();
-  const mime = STATIC_MIME[ext] ?? 'application/octet-stream';
-
-  const headers = res.headers;
-  headers['content-type'] = mime;
-  headers['etag'] = etag;
-  headers['last-modified'] = lastModified;
-  headers['accept-ranges'] = 'bytes';
-  if (matched.entry.cacheControl) {
-    headers['cache-control'] = matched.entry.cacheControl;
-  }
-
-  const reqHeaders = req?.headers;
-  const method = req?.method ?? 'GET';
-
-  // Conditional GET — `If-None-Match` wins over `If-Modified-Since` (RFC 9110).
-  const inm = reqHeaders?.['if-none-match'];
-  const ims = reqHeaders?.['if-modified-since'];
-  const notModified =
-    (inm !== undefined && etagMatches(inm, etag)) ||
-    (inm === undefined &&
-      ims !== undefined &&
-      Number.isFinite(Date.parse(ims)) &&
-      stat.mtime.getTime() <= Date.parse(ims) + 999);
-  if (notModified) {
-    finishEmpty(res, 304);
-    return true;
-  }
-
-  const file = Bun.file(filePath);
-
-  // Range request (skip for HEAD — no body to slice).
-  const range = method === 'HEAD' ? null : parseRange(reqHeaders?.['range'], size);
-  if (range === 'invalid') {
-    headers['content-range'] = `bytes */${size}`;
-    finishEmpty(res, 416);
-    return true;
-  }
-
-  res.finished = true;
-  res.headersSent = true;
-
-  if (method === 'HEAD') {
-    headers['content-length'] = String(size);
-    res._resolve(new Response(null, toResponseInit(headers, 200)));
-    return true;
-  }
-
-  if (range) {
-    const { start, end } = range;
-    headers['content-range'] = `bytes ${start}-${end}/${size}`;
-    headers['content-length'] = String(end - start + 1);
-    res._resolve(new Response(file.slice(start, end + 1), toResponseInit(headers, 206)));
-    return true;
-  }
-
-  headers['content-length'] = String(size);
-  res._resolve(new Response(file, toResponseInit(headers, res.statusCode || 200)));
+  emitFile(filePath, stat, res, req, { cacheControl: matched.entry.cacheControl });
   return true;
+}
+
+/**
+ * Serve an arbitrary file path (for `res.sendFile` / `res.download`). Returns
+ * `'served'` once the response is settled, or `'notfound'` when the path is
+ * missing or a directory so the caller can 404. A path-traversal guard rejects
+ * `..` only when `opts.root` is provided (Express semantics).
+ */
+export async function serveFilePath(
+  filePath: string,
+  res: BunResponse,
+  req?: BunRequest,
+  opts?: ServeFileOptions,
+): Promise<'served' | 'notfound'> {
+  if (typeof Bun === 'undefined' || typeof Bun.file !== 'function') {
+    finishEmpty(res, 500);
+    return 'served';
+  }
+  let stat: Stats;
+  try {
+    stat = await fs.stat(filePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return 'notfound';
+    throw err;
+  }
+  if (stat.isDirectory()) return 'notfound';
+  emitFile(filePath, stat, res, req, opts);
+  return 'served';
 }

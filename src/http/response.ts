@@ -6,6 +6,7 @@ import {
   BunResponseHeaders,
   CookieOptions,
   ResponseAdapter,
+  SendFileOptions,
 } from './types';
 
 export function toResponseInit(headers: BunResponseHeaders, status: number) {
@@ -145,6 +146,22 @@ export function makeBunResponse(
     clearCookie(name: string, options: CookieOptions = {}) {
       const opts = { ...options, expires: new Date(1), maxAge: 0 };
       return this.cookie(name, '', opts);
+    },
+    sendFile(path: string, options?: SendFileOptions, cb?: (err?: unknown) => void) {
+      adapter.sendFile(this, path, options, cb);
+    },
+    download(
+      path: string,
+      filename?: string,
+      options?: SendFileOptions,
+      cb?: (err?: unknown) => void,
+    ) {
+      // Express semantics: default the download filename to the basename and
+      // emit a Content-Disposition: attachment header before sending.
+      const name = filename || path.split(/[\\/]/).pop() || 'download';
+      this.headers['content-disposition'] =
+        `attachment; filename="${name.replace(/"/g, '\\"')}"`;
+      adapter.sendFile(this, path, options, cb);
     },
   };
   attachWritableShim(res, resolve);

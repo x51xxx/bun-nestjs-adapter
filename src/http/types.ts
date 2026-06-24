@@ -39,6 +39,20 @@ export interface BunRequest {
  */
 export type BunResponseHeaders = Record<string, string | string[]>;
 
+/** Express-compatible options accepted by `res.sendFile()` / `res.download()`. */
+export interface SendFileOptions {
+  /** Resolve `path` relative to this root and reject `..` traversal. */
+  root?: string;
+  /** Override the content-type (otherwise derived from the extension). */
+  contentType?: string;
+  /** `Cache-Control` value to emit. */
+  cacheControl?: string;
+  /** Shorthand for `Cache-Control: public, max-age=<maxAge>` (seconds). */
+  maxAge?: number;
+  /** Extra response headers to set before sending. */
+  headers?: Record<string, string>;
+}
+
 /** Express-compatible options accepted by `res.cookie()` / `res.clearCookie()`. */
 export interface CookieOptions {
   /** Lifetime in milliseconds (Express semantics — emitted as `Max-Age` seconds). */
@@ -74,6 +88,13 @@ export interface BunResponse {
   type(contentType: string): BunResponse;
   cookie(name: string, value: string | object, options?: CookieOptions): BunResponse;
   clearCookie(name: string, options?: CookieOptions): BunResponse;
+  sendFile(path: string, options?: SendFileOptions, cb?: (err?: unknown) => void): void;
+  download(
+    path: string,
+    filename?: string,
+    options?: SendFileOptions,
+    cb?: (err?: unknown) => void,
+  ): void;
 }
 
 export type BunRouteHandler = (
@@ -100,6 +121,12 @@ export interface ResponseAdapter {
   end(response: BunResponse, message?: string): void;
   redirect(response: BunResponse, statusCode: number, url: string): void;
   appendHeader(response: BunResponse, name: string, value: string): void;
+  sendFile(
+    response: BunResponse,
+    path: string,
+    options?: SendFileOptions,
+    cb?: (err?: unknown) => void,
+  ): void;
 }
 
 /**

@@ -1,4 +1,4 @@
-import { extname, join } from 'path';
+import { extname, isAbsolute, join, normalize, sep } from 'path';
 import { RequestMethod, VersioningOptions } from '@nestjs/common';
 import { VersionValue } from '@nestjs/common/interfaces';
 import { NestApplicationOptions } from '@nestjs/common/interfaces/nest-application-options.interface';
@@ -20,7 +20,7 @@ import {
 import { makeBunResponse, toResponseInit } from '../http/response';
 import { BunRouterInstance, CompiledRoute, toBunRoutePath } from '../http/router';
 import { BunHttpServer, BunNativeRouteHandler, BunNativeRoutes } from '../http/server';
-import { StaticEntry, matchStatic, serveStatic } from '../http/static';
+import { StaticEntry, matchStatic, serveFilePath, serveStatic } from '../http/static';
 import {
   StreamableLike,
   isNodeReadable,
@@ -33,6 +33,7 @@ import {
   BunResponse,
   BunRouteHandler,
   BunServer,
+  SendFileOptions,
   WsServerShim,
 } from '../http/types';
 import { applyVersionFilter } from '../http/versioning';
@@ -499,6 +500,62 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     response._resolve(
       new Response(null, toResponseInit(response.headers, response.statusCode)),
     );
+  }
+
+  public sendFile(
+    response: BunResponse,
+    path: string,
+    options?: SendFileOptions,
+    cb?: (err?: unknown) => void,
+  ) {
+    if (response.finished) return;
+    let filePath = path;
+    if (options?.root) {
+      const safe = normalize(path).replace(/^[/\\]+/, '');
+      if (safe.includes('..' + sep) || safe === '..') {
+        const err = new Error('Forbidden path traversal in sendFile');
+        if (cb) return cb(err);
+        response.statusCode = 403;
+        response.finished = true;
+        response.headersSent = true;
+        response._resolve(new Response(null, toResponseInit(response.headers, 403)));
+        return;
+      }
+      filePath = join(options.root, safe);
+    } else if (!isAbsolute(path)) {
+      const err = new Error('sendFile: path must be absolute, or set options.root');
+      return cb ? cb(err) : response._reject(err);
+    }
+    if (options?.headers) {
+      for (const [k, v] of Object.entries(options.headers)) {
+        response.headers[k.toLowerCase()] = v;
+      }
+    }
+    const cacheControl =
+      options?.cacheControl ??
+      (options?.maxAge !== undefined ? `public, max-age=${options.maxAge}` : undefined);
+    serveFilePath(filePath, response, response.req, {
+      contentType: options?.contentType,
+      cacheControl,
+    })
+      .then(result => {
+        if (result === 'notfound') {
+          if (cb) return cb(new Error('Not Found'));
+          response.statusCode = 404;
+          response.headers['content-type'] = 'application/json; charset=utf-8';
+          response.finished = true;
+          response.headersSent = true;
+          response._resolve(
+            new Response(
+              '{"statusCode":404,"message":"Not Found"}',
+              toResponseInit(response.headers, 404),
+            ),
+          );
+          return;
+        }
+        cb?.();
+      })
+      .catch(err => (cb ? cb(err) : response._reject(err)));
   }
 
   public setHeader(response: BunResponse, name: string, value: string) {
