@@ -109,6 +109,8 @@ describe('fallback dispatcher rawBody', () => {
       bodyParserEnabled: true,
       rawBodyEnabled: true,
       cookieSecret: null,
+      trustProxy: false,
+      isSecure: false,
     });
 
     expect(req.body).toBeUndefined();

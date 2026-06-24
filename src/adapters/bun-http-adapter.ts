@@ -40,6 +40,27 @@ interface ServeStaticOptions {
   index?: string;
 }
 
+/**
+ * @publicApi
+ *
+ * Construction-time options for {@link BunHttpAdapter}, forwarded to
+ * `Bun.serve`. All are optional — the adapter behaves identically to before
+ * when none are given.
+ */
+export interface BunHttpAdapterOptions {
+  /** Max request body size in bytes (`Bun.serve({ maxRequestBodySize })`). */
+  maxRequestBodySize?: number;
+  /** Idle socket timeout in seconds (`Bun.serve({ idleTimeout })`). */
+  idleTimeout?: number;
+  /** Enable SO_REUSEPORT to share the listen port across processes. */
+  reusePort?: boolean;
+  /**
+   * Trust `x-forwarded-for` / `x-forwarded-proto` for `req.ip` / `req.ips` /
+   * `req.protocol`. Off by default — those headers are client-controlled.
+   */
+  trustProxy?: boolean;
+}
+
 function isThenable(value: unknown): value is Promise<unknown> {
   return !!value && typeof (value as { then?: unknown }).then === 'function';
 }
@@ -61,6 +82,8 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     bodyParserEnabled: false,
     rawBodyEnabled: false,
     cookieSecret: null,
+    trustProxy: false,
+    isSecure: false,
   };
   private corsOptions: CorsOptions | null = null;
   private notFoundHandler: BunRouteHandler | null = null;
@@ -75,9 +98,10 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     return this.shimCtx.cookieSecret;
   }
 
-  constructor() {
+  constructor(private readonly adapterOptions: BunHttpAdapterOptions = {}) {
     super(undefined);
     this.setInstance(this.router);
+    if (adapterOptions.trustProxy) this.shimCtx.trustProxy = true;
   }
 
   public override async init() {}
@@ -91,6 +115,16 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       // secureOptions, serverName, ALPN, …); whitelisting key/cert here would
       // silently drop mTLS and TLS-hardening settings.
       server.tls = https;
+      this.shimCtx.isSecure = true;
+    }
+    if (this.adapterOptions.maxRequestBodySize !== undefined) {
+      server.maxRequestBodySize = this.adapterOptions.maxRequestBodySize;
+    }
+    if (this.adapterOptions.idleTimeout !== undefined) {
+      server.idleTimeout = this.adapterOptions.idleTimeout;
+    }
+    if (this.adapterOptions.reusePort !== undefined) {
+      server.reusePort = this.adapterOptions.reusePort;
     }
     (server as BunHttpServer & { adapter: BunHttpAdapter }).adapter = this;
     this.setHttpServer(server);
@@ -143,16 +177,17 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
         // to the `fetch` callback (which then renders our 404 JSON).
         if (handlers.length === 1 && method !== 'ALL') {
           const h = handlers[0];
-          methodHandler[method] = req => this.runBunRouteSingle(req, h);
+          methodHandler[method] = (req, server) => this.runBunRouteSingle(req, h, server);
         } else {
-          methodHandler[method] = req => this.runBunRouteChain(req, handlers);
+          methodHandler[method] = (req, server) =>
+            this.runBunRouteChain(req, handlers, server);
         }
       }
       // ALL handlers are invoked for any method that has no explicit entry.
       const allHandlers = methodMap.get('ALL');
       if (allHandlers && allHandlers.length) {
         // Collapse ALL into the wildcard form Bun expects (default route).
-        out[bunPath] = req => {
+        out[bunPath] = (req, server) => {
           // Try method-specific first when present (Bun won't dispatch them
           // because we register the same path twice — instead we attach all
           // logic here).
@@ -160,7 +195,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
           const queue = methodSpecific
             ? [...methodSpecific, ...allHandlers]
             : allHandlers;
-          return this.runBunRouteChain(req, queue);
+          return this.runBunRouteChain(req, queue, server);
         };
       } else {
         out[bunPath] = methodHandler;
@@ -507,11 +542,16 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
   private runBunRouteSingle(
     bunReq: Request,
     handler: BunRouteHandler,
+    server?: BunServer,
   ): Promise<Response> | undefined {
     if (bunReq.headers.get('upgrade')?.toLowerCase() === 'websocket') {
       return undefined;
     }
-    const req = buildNativeRouteRequest(bunReq, this.shimCtx);
+    const req = buildNativeRouteRequest(
+      bunReq,
+      this.shimCtx,
+      server?.requestIP(bunReq)?.address,
+    );
     const m = req.method;
     // Hot path: GET/HEAD without body parser — skip the async wrapper entirely.
     if (m === 'GET' || m === 'HEAD' || !this.shimCtx.bodyParserEnabled) {
@@ -546,11 +586,16 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
   private async runBunRouteChain(
     bunReq: Request,
     handlers: BunRouteHandler[],
+    server?: BunServer,
   ): Promise<Response | undefined> {
     if (bunReq.headers.get('upgrade')?.toLowerCase() === 'websocket') {
       return undefined;
     }
-    const req = buildNativeRouteRequest(bunReq, this.shimCtx);
+    const req = buildNativeRouteRequest(
+      bunReq,
+      this.shimCtx,
+      server?.requestIP(bunReq)?.address,
+    );
     await maybeParseBody(req, bunReq, this.shimCtx);
     return new Promise<Response>(resolve => {
       const res = makeBunResponse(this, req, resolve);
@@ -623,6 +668,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       rawUrl,
       queryStart,
       this.shimCtx,
+      bunServer?.requestIP(rawReq)?.address,
     );
 
     return new Promise<Response>(resolve => {

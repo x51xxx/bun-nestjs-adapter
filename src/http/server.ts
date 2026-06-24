@@ -31,6 +31,7 @@ export interface BunTlsOptions {
  */
 export type BunNativeRouteHandler = (
   req: Request,
+  server?: BunServer,
 ) => Response | undefined | Promise<Response | undefined>;
 
 /** `path → handler` or `path → { METHOD: handler }` map for `Bun.serve({ routes })`. */
@@ -50,6 +51,9 @@ interface BunServeConfig {
   unix?: string;
   routes?: BunNativeRoutes;
   tls?: BunTlsOptions;
+  maxRequestBodySize?: number;
+  idleTimeout?: number;
+  reusePort?: boolean;
 }
 
 function getBunServe(): typeof Bun.serve | undefined {
@@ -67,6 +71,12 @@ export class BunHttpServer extends EventEmitter {
   public routes: BunNativeRoutes | undefined = undefined;
   /** Optional TLS config (from Nest's `httpsOptions`) applied at listen-time. */
   public tls: BunTlsOptions | undefined = undefined;
+  /** Cap on request body bytes (`Bun.serve({ maxRequestBodySize })`). */
+  public maxRequestBodySize: number | undefined = undefined;
+  /** Idle socket timeout in seconds (`Bun.serve({ idleTimeout })`). */
+  public idleTimeout: number | undefined = undefined;
+  /** SO_REUSEPORT — share the port across processes for load balancing. */
+  public reusePort: boolean | undefined = undefined;
 
   constructor(private readonly fetchHandler: FetchHandler) {
     super();
@@ -134,6 +144,11 @@ export class BunHttpServer extends EventEmitter {
 
       if (this.routes) config.routes = this.routes;
       if (this.tls) config.tls = this.tls;
+      if (this.maxRequestBodySize !== undefined) {
+        config.maxRequestBodySize = this.maxRequestBodySize;
+      }
+      if (this.idleTimeout !== undefined) config.idleTimeout = this.idleTimeout;
+      if (this.reusePort !== undefined) config.reusePort = this.reusePort;
       // Single boundary cast: Bun.serve's overloads model unix/port variants
       // as separate option types, which a progressively-built config can't
       // satisfy statically.

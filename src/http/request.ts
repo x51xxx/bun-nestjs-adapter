@@ -44,6 +44,48 @@ export interface RequestShimContext {
   bodyParserEnabled: boolean;
   rawBodyEnabled: boolean;
   cookieSecret: string | null;
+  /** Honour `x-forwarded-for` / `x-forwarded-proto` for ip/protocol. */
+  trustProxy: boolean;
+  /** The server is bound with TLS, so the default protocol is `https`. */
+  isSecure: boolean;
+}
+
+export interface ConnectionInfo {
+  ip: string;
+  ips: string[];
+  protocol: string;
+  secure: boolean;
+}
+
+/**
+ * Derive Express-style `ip` / `ips` / `protocol` / `secure` from the socket
+ * peer address plus (when `trustProxy`) the forwarding headers. Without
+ * `trustProxy` the forwarding headers are ignored — the leftmost `x-forwarded-*`
+ * is attacker-controlled and must not be trusted by default.
+ */
+export function resolveConnection(
+  headers: Record<string, string>,
+  ctx: RequestShimContext,
+  socketAddress: string | undefined,
+): ConnectionInfo {
+  let ip = socketAddress || '127.0.0.1';
+  let ips: string[] = [];
+  let protocol = ctx.isSecure ? 'https' : 'http';
+
+  if (ctx.trustProxy) {
+    const xff = headers['x-forwarded-for'];
+    if (xff) {
+      ips = xff
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+      if (ips.length > 0) ip = ips[0];
+    }
+    const xfp = headers['x-forwarded-proto'];
+    if (xfp) protocol = xfp.split(',', 1)[0].trim();
+  }
+
+  return { ip, ips, protocol, secure: protocol === 'https' };
 }
 
 export interface ParsedBody {
@@ -144,6 +186,7 @@ export interface NativeRouteRequest extends Request {
 export function buildNativeRouteRequest(
   bunReq: NativeRouteRequest,
   ctx: RequestShimContext,
+  socketAddress?: string,
 ): BunRequest {
   const params = bunReq.params ?? EMPTY_PARAMS;
   const headers = buildHeaders(bunReq.headers);
@@ -187,6 +230,7 @@ export function buildNativeRouteRequest(
   }
 
   const parsedCookies = parseCookies(headers['cookie'], ctx.cookieSecret);
+  const conn = resolveConnection(headers, ctx, socketAddress);
   const req: BunRequest = {
     method,
     url: fullPath,
@@ -194,7 +238,10 @@ export function buildNativeRouteRequest(
     baseUrl: '',
     path: pathname,
     hostname,
-    ip: '127.0.0.1',
+    ip: conn.ip,
+    ips: conn.ips,
+    protocol: conn.protocol,
+    secure: conn.secure,
     headers,
     params,
     query,
@@ -245,6 +292,7 @@ export async function buildFetchRequest(
   rawUrl: string,
   queryStart: number,
   ctx: RequestShimContext,
+  socketAddress?: string,
 ): Promise<BunRequest> {
   const method = raw.method;
   const headers = buildHeaders(raw.headers);
@@ -274,6 +322,7 @@ export async function buildFetchRequest(
   const hostname = hostHeader ? hostHeader.split(':', 1)[0] : '';
 
   const parsedCookies = parseCookies(headers['cookie'], ctx.cookieSecret);
+  const conn = resolveConnection(headers, ctx, socketAddress);
   const req: BunRequest = {
     method,
     url: fullPath,
@@ -281,7 +330,10 @@ export async function buildFetchRequest(
     baseUrl: '',
     path: pathname,
     hostname,
-    ip: headers['x-forwarded-for']?.split(',', 1)[0].trim() ?? '127.0.0.1',
+    ip: conn.ip,
+    ips: conn.ips,
+    protocol: conn.protocol,
+    secure: conn.secure,
     headers,
     params: EMPTY_PARAMS,
     query,

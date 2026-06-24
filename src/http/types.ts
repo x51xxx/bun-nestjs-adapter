@@ -11,6 +11,12 @@ export interface BunRequest {
   path: string;
   hostname: string;
   ip: string;
+  /** Forwarded-for chain (left→right) when `trustProxy` is on, else empty. */
+  ips: string[];
+  /** `'https'` when served over TLS (or `x-forwarded-proto` under trustProxy). */
+  protocol: string;
+  /** `true` when `protocol === 'https'`. */
+  secure: boolean;
   headers: Record<string, string>;
   params: Record<string, string>;
   query: Record<string, string | string[]>;
