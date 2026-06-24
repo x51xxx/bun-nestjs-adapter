@@ -1,7 +1,9 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/index.ts'],
+  // Microservices is a SEPARATE entry so the optional `@nestjs/microservices`
+  // peer never lands in the main HTTP/WS bundle.
+  entry: ['src/index.ts', 'src/microservices/index.ts'],
   format: ['esm', 'cjs'],
   dts: true,
   sourcemap: true,
@@ -15,6 +17,7 @@ export default defineConfig({
     '@nestjs/common',
     '@nestjs/core',
     '@nestjs/websockets',
+    '@nestjs/microservices',
     'rxjs',
     'tslib',
     'bun',

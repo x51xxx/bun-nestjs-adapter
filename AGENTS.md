@@ -15,6 +15,7 @@ Key capabilities:
 - Server-Sent Events (`@Sse()`).
 - File uploads via `BunFileInterceptor`, `BunFilesInterceptor`, `BunAnyFilesInterceptor` using native `Request.formData()`.
 - WebSocket via `BunWsAdapter` with Bun's native pub/sub (`subscribe` / `unsubscribe` / `publish`).
+- Microservices TCP transport (`BunServerTcp` / `BunClientTcp`) on `Bun.listen()` / `Bun.connect()`, wire-compatible with Nest's built-in TCP transport. Shipped from the **separate** `/microservices` entry point so the optional `@nestjs/microservices` peer never enters the main bundle.
 
 Runtime requirement: **Bun ≥ 1.2.0** (engines field says `>=1.2.0`; CI pins `1.3.5`).
 
@@ -61,6 +62,12 @@ src/                          # Published source
   interceptors/
     bun-file-interceptor.ts   # ~160 LOC — file upload interceptors
     index.ts                  # Re-exports interceptors
+  microservices/              # SEPARATE entry point (./microservices subpath)
+    json-socket.ts            # BunJsonSocket — length-prefixed JSON framing over Bun TCP
+    server-tcp.ts             # BunServerTcp — CustomTransportStrategy on Bun.listen()
+    client-tcp.ts             # BunClientTcp — ClientProxy on Bun.connect()
+    types.ts                  # BunTcpOptions + NO_MESSAGE_HANDLER
+    index.ts                  # Re-exports the TCP transport
   index.ts                    # Package entrypoint — exports adapters + interceptors
 
 tests/
@@ -314,6 +321,7 @@ When fixing any of these, drop `.skip` from the relevant `describe.skip` in `ups
 | HTTP dispatch, versioning, CORS, static assets, views | `src/adapters/bun-http-adapter.ts` |
 | Request/response shims, router, cookies, body parsing, Bun.serve wrapper | `src/http/*.ts` |
 | WebSocket gateway behaviour, pub/sub | `src/adapters/bun-ws-adapter.ts` |
+| Microservices TCP transport (server/client/framing) | `src/microservices/*.ts` |
 | File upload interceptors | `src/interceptors/bun-file-interceptor.ts` |
 | Public API surface | `src/index.ts`, `src/adapters/index.ts`, `src/interceptors/index.ts` |
 | Integration / E2E tests | `tests/integration/*.spec.ts` + `tests/integration/fixtures/own/` |

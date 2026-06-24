@@ -19,6 +19,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./microservices": {
+      "types": "./dist/microservices/index.d.ts",
+      "import": "./dist/microservices/index.js",
+      "require": "./dist/microservices/index.cjs"
     }
   },
   "files": ["dist", "README.md", "LICENSE"],
@@ -51,6 +56,7 @@
     "@nestjs/common": "^10.0.0 || ^11.0.0",
     "@nestjs/core": "^10.0.0 || ^11.0.0",
     "@nestjs/websockets": "^10.0.0 || ^11.0.0",
+    "@nestjs/microservices": "^10.0.0 || ^11.0.0",
     "ejs": "^3.0.0 || ^4.0.0 || ^5.0.0 || ^6.0.0",
     "handlebars": "^4.0.0",
     "pug": "^3.0.0",
@@ -58,6 +64,9 @@
   },
   "peerDependenciesMeta": {
     "@nestjs/websockets": {
+      "optional": true
+    },
+    "@nestjs/microservices": {
       "optional": true
     },
     "ejs": {
@@ -87,6 +96,7 @@
     "@nestjs/common": "^11.1.10",
     "@nestjs/core": "^11.1.10",
     "@nestjs/graphql": "^13.4.0",
+    "@nestjs/microservices": "^11.1.10",
     "@nestjs/platform-express": "^11.1.10",
     "@nestjs/platform-fastify": "^11.1.10",
     "@nestjs/testing": "^11.1.10",

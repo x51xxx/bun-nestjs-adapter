@@ -35,6 +35,12 @@ whenever no middleware/static/CORS feature is active.
   `@WebSocketGateway()` with **no port (or the HTTP port) shares the main
   `Bun.serve`** via HTTP upgrade — no second listener; an explicit *different*
   port still spins up its own server.
+- **Microservices (TCP)**: `BunServerTcp` / `BunClientTcp` on top of
+  `Bun.listen()` / `Bun.connect()` instead of `node:net`. Speak the exact
+  length-prefixed JSON framing of Nest's built-in TCP transport, so they are
+  **wire-compatible** with stock `ServerTCP` / `ClientTCP` (mix and match in
+  either direction). Imported from the `/microservices` subpath so the optional
+  `@nestjs/microservices` peer never lands in the HTTP/WS bundle.
 
 ## Documentation
 
@@ -145,6 +151,43 @@ export class EventsController {
     return interval(1000).pipe(map(t => ({ data: { tick: t } })));
   }
 }
+```
+
+### Microservices (TCP)
+
+`BunServerTcp` is a Nest `CustomTransportStrategy`; `BunClientTcp` is a
+`ClientProxy`. Both speak Nest's built-in TCP wire format, so they interoperate
+with stock `@nestjs/microservices` peers in either direction.
+
+```ts
+// main.ts — server side
+import { NestFactory } from '@nestjs/core';
+import { MicroserviceOptions } from '@nestjs/microservices';
+import { BunServerTcp } from '@trishchuk/bun-nestjs-adapter/microservices';
+import { AppModule } from './app.module';
+
+const app = await NestFactory.createMicroservice<MicroserviceOptions>(AppModule, {
+  strategy: new BunServerTcp({ host: '0.0.0.0', port: 3001 }),
+});
+await app.listen();
+```
+
+```ts
+// client side
+import { BunClientTcp } from '@trishchuk/bun-nestjs-adapter/microservices';
+import { firstValueFrom } from 'rxjs';
+
+const client = new BunClientTcp({ host: 'localhost', port: 3001 });
+const sum = await firstValueFrom(client.send('sum', [1, 2, 3])); // 6
+client.emit('user.created', { id: 7 }); // fire-and-forget event
+```
+
+Register the client via `ClientsModule` with a `customClass` if you prefer DI:
+
+```ts
+ClientsModule.register([
+  { name: 'MATH', customClass: BunClientTcp, options: { port: 3001 } },
+]);
 ```
 
 ## How it stacks up

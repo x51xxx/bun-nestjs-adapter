@@ -45,6 +45,8 @@ Benchmarks: `bun run bench` (single-adapter HTTP). `bun run bench:matrix` / `bun
 
 Important: **`bun-http-adapter.ts` must not import from `bun-ws-adapter.ts`** — the WS adapter imports `@nestjs/websockets` (an *optional* peer dependency), so importing it into the HTTP path would break HTTP-only consumers who haven't installed it. Duplicate the small helper instead (e.g. path normalization for `wsPaths` lookups).
 
+**Microservices** (`src/microservices/`): a TCP transport — `BunServerTcp` (a `CustomTransportStrategy` on `Bun.listen()`) and `BunClientTcp` (a `ClientProxy` on `Bun.connect()`). Both wrap `BunJsonSocket`, which reimplements Nest's `JsonSocket` length-prefixed framing (`<charLength>#<json>`, where the prefix is the JSON string's **character** length, not byte length — receiving uses a streaming `TextDecoder` so a multibyte sequence split across TCP reads is reassembled before the length compare). Staying byte-exact to that format is what makes the transport interoperate with stock `ServerTCP`/`ClientTCP`. This code imports `@nestjs/microservices` (another *optional* peer), so it ships from a **separate entry point** (`src/microservices/index.ts` → `@trishchuk/bun-nestjs-adapter/microservices`, wired in `tsup.config.ts` + `package.json` `exports`). Never re-export it from `src/index.ts` — that would pull `@nestjs/microservices` into the main HTTP/WS bundle.
+
 ## Non-obvious gotchas
 
 - **`tsconfig.json` `paths` redirect is load-bearing.** Every `@nestjs/*` resolves to `./fixtures/nestjs-nest/node_modules/@nestjs/*` so adapter code, tests, and upstream fixtures share **one** copy of Nest. Removing it reintroduces duplicate-class/duplicate-Symbol DI failures. Don't touch `paths` casually.
