@@ -1,13 +1,24 @@
 /**
  * Native response compression using Bun's built-in codecs
- * (`Bun.gzipSync` / `Bun.deflateSync` / `Bun.zstdCompressSync`) — no Node
- * `zlib` stream or the Express `compression` middleware required.
+ * (`Bun.gzipSync` / `Bun.deflateSync` / `Bun.zstdCompressSync`) plus Brotli via
+ * `node:zlib` — no Express `compression` middleware required.
  *
  * Only buffered, text-like responses above a size threshold are compressed;
  * streaming responses (SSE, `StreamableFile`) are left untouched.
  */
+import { BrotliOptions, brotliCompressSync, constants as zlibConstants } from 'node:zlib';
+import { acceptsEncodings } from './negotiation';
 
-export type CompressionEncoding = 'gzip' | 'deflate' | 'zstd';
+export type CompressionEncoding = 'br' | 'gzip' | 'deflate' | 'zstd';
+
+// Server preference order. Brotli first (best ratio for text); ties on the
+// client side are broken by this order in `acceptsEncodings`.
+const SUPPORTED: CompressionEncoding[] = ['br', 'gzip', 'zstd', 'deflate'];
+
+// Moderate Brotli quality — full quality (11) is too slow for dynamic bodies.
+const BROTLI_OPTS: BrotliOptions = {
+  params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 5 },
+};
 
 export interface CompressionConfig {
   /** Minimum uncompressed byte length before compression kicks in. */
@@ -25,26 +36,17 @@ export function isCompressible(contentType: string | string[] | undefined): bool
   return COMPRESSIBLE.test(ct);
 }
 
-/** Does the `Accept-Encoding` value accept `enc` (respecting an explicit `q=0`)? */
-function accepts(acceptEncoding: string, enc: string): boolean {
-  const re = new RegExp(`(?:^|,)\\s*${enc}\\b\\s*(?:;\\s*q=([0-9.]+))?`, 'i');
-  const m = acceptEncoding.match(re);
-  if (!m) return false;
-  return m[1] === undefined || Number.parseFloat(m[1]) > 0;
-}
-
 /**
- * Pick an encoding from `Accept-Encoding`. Prefers `gzip` (universally
- * supported), then `zstd`, then `deflate`. Returns `null` when none apply.
+ * Pick an encoding from `Accept-Encoding`, q-value aware (via `acceptsEncodings`).
+ * Server preference (`br` > `gzip` > `zstd` > `deflate`) breaks client ties.
+ * Returns `null` when none apply.
  */
 export function negotiateEncoding(
   acceptEncoding: string | undefined,
 ): CompressionEncoding | null {
   if (!acceptEncoding) return null;
-  if (accepts(acceptEncoding, 'gzip')) return 'gzip';
-  if (accepts(acceptEncoding, 'zstd')) return 'zstd';
-  if (accepts(acceptEncoding, 'deflate')) return 'deflate';
-  return null;
+  const chosen = acceptsEncodings(acceptEncoding, SUPPORTED as string[]);
+  return chosen && chosen !== 'identity' ? (chosen as CompressionEncoding) : null;
 }
 
 export function compress(encoding: CompressionEncoding, data: Uint8Array): Uint8Array {
@@ -52,6 +54,8 @@ export function compress(encoding: CompressionEncoding, data: Uint8Array): Uint8
   // result is the wider `Uint8Array<ArrayBufferLike>`. They are runtime-identical.
   const d = data as Uint8Array<ArrayBuffer>;
   switch (encoding) {
+    case 'br':
+      return brotliCompressSync(d, BROTLI_OPTS);
     case 'gzip':
       return Bun.gzipSync(d);
     case 'deflate':
