@@ -77,10 +77,28 @@ export interface BunHttpAdapterOptions {
    * to tune it. Streaming responses (SSE, `StreamableFile`) are never compressed.
    */
   compression?: boolean | { threshold?: number };
+  /**
+   * Emit an `ETag` for buffered GET/HEAD responses (string / JSON / Buffer) and
+   * answer matching `If-None-Match` requests with `304`. `true` / `'weak'` uses
+   * a weak tag (`W/"…"`); `'strong'` omits the `W/` prefix. Hash is Bun.hash
+   * (wyhash). Streaming responses are not tagged.
+   */
+  etag?: boolean | 'weak' | 'strong';
 }
 
 function isThenable(value: unknown): value is Promise<unknown> {
   return !!value && typeof (value as { then?: unknown }).then === 'function';
+}
+
+/** `If-None-Match` membership (weak comparison — the `W/` prefix is ignored). */
+function ifNoneMatch(header: string, etag: string): boolean {
+  const h = header.trim();
+  if (h === '*') return true;
+  const bare = etag.startsWith('W/') ? etag.slice(2) : etag;
+  return h.split(',').some(part => {
+    const tag = part.trim();
+    return (tag.startsWith('W/') ? tag.slice(2) : tag) === bare;
+  });
 }
 
 /**
@@ -112,6 +130,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
   private viewEngine: string | null = null;
   private viewsDir = join(process.cwd(), 'views');
   private readonly compression: CompressionConfig | null;
+  private readonly etag: 'weak' | 'strong' | null;
 
   public get cookieSecret(): string | null {
     return this.shimCtx.cookieSecret;
@@ -125,6 +144,8 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     this.compression = comp
       ? { threshold: (typeof comp === 'object' && comp.threshold) || 1024 }
       : null;
+    const et = adapterOptions.etag;
+    this.etag = et ? (et === 'strong' ? 'strong' : 'weak') : null;
   }
 
   public override async init() {}
@@ -357,6 +378,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       if (response.headers['content-type'] === undefined) {
         response.headers['content-type'] = 'text/html; charset=utf-8';
       }
+      if (this.etag && this.applyConditionalEtag(response, body)) return;
       if (this.tryCompressResolve(response, body)) return;
       response.body = body;
       response.finished = true;
@@ -374,11 +396,9 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     ) {
       // Blob / ReadableStream stay as-is; only fixed-size buffers can be
       // compressed (tryCompressResolve self-gates on a compressible type).
-      if (
-        (body instanceof Uint8Array || body instanceof ArrayBuffer) &&
-        this.tryCompressResolve(response, body)
-      ) {
-        return;
+      if (body instanceof Uint8Array || body instanceof ArrayBuffer) {
+        if (this.etag && this.applyConditionalEtag(response, body)) return;
+        if (this.tryCompressResolve(response, body)) return;
       }
       response.body = body;
       response.finished = true;
@@ -399,6 +419,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     if (response.headers['content-type'] === undefined) {
       response.headers['content-type'] = 'application/json; charset=utf-8';
     }
+    if (this.etag && this.applyConditionalEtag(response, body)) return;
     if (this.tryCompressResolve(response, body)) return;
     response.body = body;
     response.finished = true;
@@ -444,6 +465,37 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       ),
     );
     return true;
+  }
+
+  /**
+   * When ETag is enabled, hash a buffered GET/HEAD body, set the `ETag` header,
+   * and short-circuit to `304` when `If-None-Match` matches. Returns `true` if
+   * it sent a 304; `false` (header still set) to continue normal resolution.
+   */
+  private applyConditionalEtag(response: BunResponse, body: unknown): boolean {
+    const method = response.req.method;
+    if (method !== 'GET' && method !== 'HEAD') return false;
+
+    let bytes: Uint8Array;
+    if (typeof body === 'string') bytes = new TextEncoder().encode(body);
+    else if (body instanceof Uint8Array) bytes = body;
+    else if (body instanceof ArrayBuffer) bytes = new Uint8Array(body);
+    else bytes = new TextEncoder().encode(JSON.stringify(body));
+
+    const hash = Bun.hash(bytes).toString(16);
+    const tag = `"${bytes.length.toString(16)}-${hash}"`;
+    const etag = this.etag === 'strong' ? tag : `W/${tag}`;
+    response.headers['etag'] = etag;
+
+    const inm = response.req.headers['if-none-match'];
+    if (inm !== undefined && ifNoneMatch(inm, etag)) {
+      response.statusCode = 304;
+      response.finished = true;
+      response.headersSent = true;
+      response._resolve(new Response(null, toResponseInit(response.headers, 304)));
+      return true;
+    }
+    return false;
   }
 
   private replyStreamable(response: BunResponse, file: StreamableLike) {

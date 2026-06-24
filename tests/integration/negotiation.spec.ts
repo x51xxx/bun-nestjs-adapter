@@ -29,7 +29,7 @@ class NegController {
   }
 
   @Get('format')
-  format(@Req() req: any, @Res() res: any) {
+  format(@Res() res: any) {
     res.format({
       'application/json': () => res.json({ kind: 'json' }),
       'text/html': () => res.type('text/html').send('<b>html</b>'),

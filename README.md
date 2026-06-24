@@ -19,7 +19,14 @@ whenever no middleware/static/CORS feature is active.
   dispatch (header / media-type / custom versioning), `applyVersionFilter` for
   URI / HEADER / MEDIA_TYPE / CUSTOM, CORS, Express-compatible `req` / `res`
   shim methods.
-- **Static assets** via `Bun.file()` (`useStaticAssets(root, { prefix, index })`).
+- **Static assets** via `Bun.file()` (`useStaticAssets(root, { prefix, index, cacheControl, maxAge })`)
+  with byte ranges (206), conditional requests (304) and ETag/Last-Modified.
+- **`res.sendFile()` / `res.download()`** backed by `Bun.file()` (same range / 304 / caching).
+- **Adapter options**: `maxRequestBodySize`, `idleTimeout`, `reusePort`, `trustProxy`,
+  `compression` (gzip/deflate/zstd), `etag` (auto weak/strong + `If-None-Match` → 304).
+- **Connection info**: real `req.ip` (`server.requestIP()`), `req.ips` / `req.protocol` / `req.secure`.
+- **Content negotiation**: `req.accepts` / `acceptsEncodings` / `acceptsLanguages` / `is` / `range`,
+  and `res.format` / `jsonp` / `attachment` / `location` / `vary` / `append`.
 - **Streaming**: `StreamableFile` and bare Node `Readable` returns are converted
   to a Web `ReadableStream` and piped through `Bun.serve`.
 - **Server-Sent Events** (`@Sse()`) — the response carries a Node-`Writable`
@@ -28,7 +35,8 @@ whenever no middleware/static/CORS feature is active.
 - **File uploads**: `BunFileInterceptor`, `BunFilesInterceptor`,
   `BunAnyFilesInterceptor` — read multipart bodies via the native
   `Request.formData()` and populate `req.file` / `req.files`. Optional
-  `limits` (`fileSize`, `files`) reject oversized / too-many-file uploads.
+  `limits` (`fileSize`, `files`) reject oversized / too-many-file uploads, and a
+  `dest` option streams uploads to disk via `Bun.write` instead of buffering.
 - **WebSocket**: `BunWsAdapter` on top of `Bun.serve({ websocket })` with shim
   EventEmitters that map Bun callbacks to Node-`ws` events; native pub/sub
   (`client.subscribe / unsubscribe / publish`, `server.publish`). A

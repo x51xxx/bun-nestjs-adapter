@@ -52,7 +52,9 @@ src/                          # Published source
     server.ts                 # BunHttpServer (Bun.serve wrapper, TLS, unix sockets, native routes)
     request.ts                # request-shim builders, buildHeaders, parseQuery, shared body parser
     response.ts               # makeBunResponse, writable/SSE shim, toResponseInit
-    cookies.ts                # parse/sign/unsign cookies
+    cookies.ts                # parse (Bun.CookieMap) / sign / unsign cookies
+    compression.ts            # gzip/deflate/zstd negotiation + Bun codecs
+    negotiation.ts            # Accept / Accept-Encoding / Accept-Language + req.is
     cors.ts                   # CorsOptions + applyCorsHeaders
     versioning.ts             # applyVersionFilter (HEADER/MEDIA_TYPE/CUSTOM)
     views.ts                  # renderTemplate (ejs/hbs/pug, lazy imports)
