@@ -3,6 +3,13 @@ import { RequestMethod, VersioningOptions } from '@nestjs/common';
 import { VersionValue } from '@nestjs/common/interfaces';
 import { NestApplicationOptions } from '@nestjs/common/interfaces/nest-application-options.interface';
 import { AbstractHttpAdapter } from '@nestjs/core';
+import {
+  CompressionConfig,
+  addVaryAcceptEncoding,
+  compress,
+  isCompressible,
+  negotiateEncoding,
+} from '../http/compression';
 import { CorsOptions, applyCorsHeaders } from '../http/cors';
 import {
   RequestShimContext,
@@ -63,6 +70,12 @@ export interface BunHttpAdapterOptions {
    * `req.protocol`. Off by default — those headers are client-controlled.
    */
   trustProxy?: boolean;
+  /**
+   * Compress buffered text-like responses (gzip / deflate / zstd) based on the
+   * request's `Accept-Encoding`. `true` uses a 1 KiB threshold; pass an object
+   * to tune it. Streaming responses (SSE, `StreamableFile`) are never compressed.
+   */
+  compression?: boolean | { threshold?: number };
 }
 
 function isThenable(value: unknown): value is Promise<unknown> {
@@ -97,6 +110,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
   public readonly wsPaths = new Map<string, WsServerShim>();
   private viewEngine: string | null = null;
   private viewsDir = join(process.cwd(), 'views');
+  private readonly compression: CompressionConfig | null;
 
   public get cookieSecret(): string | null {
     return this.shimCtx.cookieSecret;
@@ -106,6 +120,10 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     super(undefined);
     this.setInstance(this.router);
     if (adapterOptions.trustProxy) this.shimCtx.trustProxy = true;
+    const comp = adapterOptions.compression;
+    this.compression = comp
+      ? { threshold: (typeof comp === 'object' && comp.threshold) || 1024 }
+      : null;
   }
 
   public override async init() {}
@@ -338,6 +356,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       if (response.headers['content-type'] === undefined) {
         response.headers['content-type'] = 'text/html; charset=utf-8';
       }
+      if (this.tryCompressResolve(response, body)) return;
       response.body = body;
       response.finished = true;
       response.headersSent = true;
@@ -352,6 +371,14 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       body instanceof Blob ||
       body instanceof ReadableStream
     ) {
+      // Blob / ReadableStream stay as-is; only fixed-size buffers can be
+      // compressed (tryCompressResolve self-gates on a compressible type).
+      if (
+        (body instanceof Uint8Array || body instanceof ArrayBuffer) &&
+        this.tryCompressResolve(response, body)
+      ) {
+        return;
+      }
       response.body = body;
       response.finished = true;
       response.headersSent = true;
@@ -371,12 +398,51 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     if (response.headers['content-type'] === undefined) {
       response.headers['content-type'] = 'application/json; charset=utf-8';
     }
+    if (this.tryCompressResolve(response, body)) return;
     response.body = body;
     response.finished = true;
     response.headersSent = true;
     response._resolve(
       Response.json(body, toResponseInit(response.headers, response.statusCode)),
     );
+  }
+
+  /**
+   * When compression is enabled, compress a buffered text-like body in place
+   * and settle the response. Returns `true` if it handled the response, `false`
+   * to let the caller resolve normally (encoding not accepted, body too small,
+   * or content-type not compressible). `content-type` must already be set.
+   */
+  private tryCompressResolve(response: BunResponse, body: unknown): boolean {
+    const cfg = this.compression;
+    if (!cfg) return false;
+    if (!isCompressible(response.headers['content-type'])) return false;
+    const encoding = negotiateEncoding(response.req.headers['accept-encoding']);
+    if (!encoding) return false;
+
+    let bytes: Uint8Array;
+    if (typeof body === 'string') bytes = new TextEncoder().encode(body);
+    else if (body instanceof Uint8Array) bytes = body;
+    else if (body instanceof ArrayBuffer) bytes = new Uint8Array(body);
+    else bytes = new TextEncoder().encode(JSON.stringify(body));
+
+    if (bytes.length < cfg.threshold) return false;
+
+    const compressed = compress(encoding, bytes);
+    const headers = response.headers;
+    headers['content-encoding'] = encoding;
+    headers['content-length'] = String(compressed.length);
+    addVaryAcceptEncoding(headers);
+    response.body = compressed;
+    response.finished = true;
+    response.headersSent = true;
+    response._resolve(
+      new Response(
+        compressed as unknown as BodyInit,
+        toResponseInit(headers, response.statusCode),
+      ),
+    );
+    return true;
   }
 
   private replyStreamable(response: BunResponse, file: StreamableLike) {
