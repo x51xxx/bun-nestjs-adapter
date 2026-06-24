@@ -1,3 +1,6 @@
+import { randomUUID } from 'crypto';
+import { promises as fs } from 'fs';
+import { extname, join } from 'path';
 import {
   BadRequestException,
   CallHandler,
@@ -11,13 +14,20 @@ import {
 import { Observable, from, switchMap } from 'rxjs';
 
 /**
- * Options for configuring multipart form-data parser limits.
+ * Options for configuring multipart form-data parsing.
  */
 export interface BunMultipartOptions {
   limits?: {
     fileSize?: number; // max file size in bytes
     files?: number; // max number of files
   };
+  /**
+   * Write uploads to this directory (streamed via `Bun.write`) instead of
+   * buffering them in memory. Each file gets a random name; the result carries
+   * `path` / `filename` / `destination` (and no `buffer`), like Multer's
+   * `diskStorage`. The directory is created if missing.
+   */
+  dest?: string;
 }
 
 /**
@@ -31,7 +41,14 @@ export interface BunUploadedFile {
   originalname: string;
   mimetype: string;
   size: number;
-  buffer: Buffer;
+  /** Present for in-memory storage (the default). */
+  buffer?: Buffer;
+  /** Directory the file was written to (disk storage only). */
+  destination?: string;
+  /** Generated on-disk filename (disk storage only). */
+  filename?: string;
+  /** Full on-disk path (disk storage only). */
+  path?: string;
 }
 
 /** The duck-typed `File`-like entry FormData yields for uploads. */
@@ -39,6 +56,7 @@ interface FormDataFileEntry {
   arrayBuffer(): Promise<ArrayBuffer>;
   name: string;
   type: string;
+  size?: number;
 }
 
 /** The request fields the interceptors read and populate. */
@@ -60,15 +78,28 @@ function isFileEntry(value: unknown): value is FormDataFileEntry {
 async function fileFromFormDataEntry(
   fieldname: string,
   value: FormDataFileEntry,
+  dest?: string,
 ): Promise<BunUploadedFile> {
+  const mimetype = value.type || 'application/octet-stream';
+  if (dest) {
+    // Disk storage: stream the File straight to disk with Bun.write — no
+    // Buffer materialised on the JS heap.
+    await fs.mkdir(dest, { recursive: true });
+    const filename = `${randomUUID()}${extname(value.name)}`;
+    const fullPath = join(dest, filename);
+    const size = await Bun.write(fullPath, value as unknown as Blob);
+    return {
+      fieldname,
+      originalname: value.name,
+      mimetype,
+      size,
+      destination: dest,
+      filename,
+      path: fullPath,
+    };
+  }
   const buffer = Buffer.from(await value.arrayBuffer());
-  return {
-    fieldname,
-    originalname: value.name,
-    mimetype: value.type || 'application/octet-stream',
-    size: buffer.length,
-    buffer,
-  };
+  return { fieldname, originalname: value.name, mimetype, size: buffer.length, buffer };
 }
 
 async function readFormData(
@@ -94,11 +125,26 @@ async function readFormData(
     if (typeof value === 'string') {
       fields[key] = value;
     } else if (isFileEntry(value)) {
+      // The DOM `File` type and our structural `FormDataFileEntry` don't unify
+      // under the type guard, so bind a typed view explicitly.
+      const fileVal = value as unknown as FormDataFileEntry;
       totalFiles++;
       if (limits?.files !== undefined && totalFiles > limits.files) {
         throw new BadRequestException(`Too many files (limit: ${limits.files})`);
       }
-      const file = await fileFromFormDataEntry(key, value);
+      // Pre-check via the File's declared size so an oversized disk upload is
+      // rejected before it is written.
+      if (
+        limits?.fileSize !== undefined &&
+        fileVal.size !== undefined &&
+        fileVal.size > limits.fileSize
+      ) {
+        throw new PayloadTooLargeException(
+          `File size limit exceeded (limit: ${limits.fileSize} bytes)`,
+        );
+      }
+      const file = await fileFromFormDataEntry(key, fileVal, options?.dest);
+      // Post-check covers memory storage when the size wasn't declared upfront.
       if (limits?.fileSize !== undefined && file.size > limits.fileSize) {
         throw new PayloadTooLargeException(
           `File size limit exceeded (limit: ${limits.fileSize} bytes)`,
