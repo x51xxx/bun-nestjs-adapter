@@ -30,7 +30,25 @@ export interface BunRequest {
   bunRequest: Request;
   get(name: string): string | undefined;
   header(name: string): string | undefined;
+  /** Best match of `types` against the `Accept` header, or `false`. */
+  accepts(...types: string[]): string | false;
+  /** Best match against `Accept-Encoding` (defaults to `identity`), or `false`. */
+  acceptsEncodings(...encodings: string[]): string | false;
+  /** Best match against `Accept-Language`, or `false`. */
+  acceptsLanguages(...languages: string[]): string | false;
+  /** Does the request body `Content-Type` match? Matched type / `false` / `null`. */
+  is(...types: string[]): string | false | null;
+  /** Parse the `Range` header against `size`: ranges array, `-1`, `-2`, or `undefined`. */
+  range(size: number): RangeParseResult;
 }
+
+/** A satisfiable byte-range list (carries `type`, like Express' `req.range`). */
+export interface ByteRanges extends Array<{ start: number; end: number }> {
+  type: string;
+}
+
+/** `-1` unsatisfiable, `-2` malformed, `undefined` no header, else the ranges. */
+export type RangeParseResult = ByteRanges | -1 | -2 | undefined;
 
 /**
  * Plain-object outbound headers map. Bun.serve accepts `Record<string,string>`
@@ -95,6 +113,18 @@ export interface BunResponse {
     options?: SendFileOptions,
     cb?: (err?: unknown) => void,
   ): void;
+  /** Content-negotiated dispatch: pick the handler matching the `Accept` header. */
+  format(handlers: Record<string, () => void>): BunResponse;
+  /** JSON with optional JSONP callback wrapping when `?callback=` is present. */
+  jsonp(body: unknown): BunResponse;
+  /** Set `Content-Disposition: attachment` (and a type from the extension). */
+  attachment(filename?: string): BunResponse;
+  /** Set the `Location` response header. */
+  location(url: string): BunResponse;
+  /** Append a field to the `Vary` response header. */
+  vary(field: string | string[]): BunResponse;
+  /** Append a value to a (possibly multi-valued) response header. */
+  append(name: string, value: string | string[]): BunResponse;
 }
 
 export type BunRouteHandler = (

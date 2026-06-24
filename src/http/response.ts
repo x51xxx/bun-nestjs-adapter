@@ -9,6 +9,20 @@ import {
   SendFileOptions,
 } from './types';
 
+// Minimal extension→type map for `res.attachment()` (kept local to avoid a
+// circular import with static.ts, which imports `toResponseInit` from here).
+const ATTACHMENT_MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.csv': 'text/csv; charset=utf-8',
+  '.pdf': 'application/pdf',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.zip': 'application/zip',
+};
+
 export function toResponseInit(headers: BunResponseHeaders, status: number) {
   // If there are no array values (like set-cookie), we can pass the plain object to avoid allocations.
   let hasArray = false;
@@ -149,6 +163,85 @@ export function makeBunResponse(
     },
     sendFile(path: string, options?: SendFileOptions, cb?: (err?: unknown) => void) {
       adapter.sendFile(this, path, options, cb);
+    },
+    format(handlers: Record<string, () => void>) {
+      const offered = Object.keys(handlers).filter(k => k !== 'default');
+      const chosen = this.req.accepts(...offered);
+      if (chosen && handlers[chosen]) {
+        this.vary('Accept');
+        handlers[chosen]();
+      } else if (handlers.default) {
+        handlers.default();
+      } else {
+        this.status(406);
+        adapter.reply(this, { statusCode: 406, message: 'Not Acceptable' });
+      }
+      return this;
+    },
+    jsonp(body: unknown) {
+      const cbName = this.req.query?.callback;
+      if (typeof cbName === 'string' && cbName) {
+        // Sanitize to a safe JS identifier path before interpolating.
+        const safe = cbName.replace(/[^\w$.]/g, '');
+        const json = JSON.stringify(body ?? null)
+          .replace(/\u2028/g, '\\u2028')
+          .replace(/\u2029/g, '\\u2029');
+        this.headers['content-type'] = 'application/javascript; charset=utf-8';
+        this.headers['x-content-type-options'] = 'nosniff';
+        adapter.reply(this, `/**/ typeof ${safe} === 'function' && ${safe}(${json});`);
+      } else {
+        this.json(body);
+      }
+      return this;
+    },
+    attachment(filename?: string) {
+      if (filename) {
+        const safe = filename.replace(/"/g, '\\"');
+        this.headers['content-disposition'] = `attachment; filename="${safe}"`;
+        const ext = filename.slice(filename.lastIndexOf('.')).toLowerCase();
+        const mime = ATTACHMENT_MIME[ext];
+        if (mime && this.headers['content-type'] === undefined) {
+          this.headers['content-type'] = mime;
+        }
+      } else {
+        this.headers['content-disposition'] = 'attachment';
+      }
+      return this;
+    },
+    location(url: string) {
+      this.headers['location'] = url;
+      return this;
+    },
+    vary(field: string | string[]) {
+      const fields = Array.isArray(field) ? field : [field];
+      const existing = this.headers['vary'];
+      const current =
+        existing === undefined
+          ? ''
+          : Array.isArray(existing)
+            ? existing.join(', ')
+            : existing;
+      const have = new Set(
+        current
+          .split(',')
+          .map(s => s.trim().toLowerCase())
+          .filter(Boolean),
+      );
+      const merged = current ? [current] : [];
+      for (const f of fields) {
+        if (f === '*') {
+          this.headers['vary'] = '*';
+          return this;
+        }
+        if (!have.has(f.toLowerCase())) merged.push(f);
+      }
+      this.headers['vary'] = merged.join(', ');
+      return this;
+    },
+    append(name: string, value: string | string[]) {
+      const values = Array.isArray(value) ? value.map(String) : [String(value)];
+      for (const v of values) adapter.appendHeader(this, name, v);
+      return this;
     },
     download(
       path: string,

@@ -1,6 +1,55 @@
 import { EventEmitter } from 'events';
 import { parseCookies } from './cookies';
-import { BunRequest, EMPTY_PARAMS, EMPTY_QUERY } from './types';
+import { accepts, acceptsEncodings, acceptsLanguages, typeIs } from './negotiation';
+import {
+  BunRequest,
+  ByteRanges,
+  EMPTY_PARAMS,
+  EMPTY_QUERY,
+  RangeParseResult,
+} from './types';
+
+/** Parse a (possibly multi-)`Range` header against `size`, Express-style. */
+function parseRangeHeader(header: string | undefined, size: number): RangeParseResult {
+  if (!header) return undefined;
+  if (!header.startsWith('bytes=')) return -2;
+  const ranges = [] as unknown as ByteRanges;
+  ranges.type = 'bytes';
+  for (const spec of header.slice(6).split(',')) {
+    const dash = spec.indexOf('-');
+    if (dash === -1) return -2;
+    const startStr = spec.slice(0, dash).trim();
+    const endStr = spec.slice(dash + 1).trim();
+    let start: number;
+    let end: number;
+    if (startStr === '') {
+      const suffix = Number(endStr);
+      if (!Number.isFinite(suffix)) return -2;
+      start = Math.max(0, size - suffix);
+      end = size - 1;
+    } else {
+      start = Number(startStr);
+      end = endStr === '' ? size - 1 : Number(endStr);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return -2;
+      if (end > size - 1) end = size - 1;
+    }
+    if (start > end || start < 0) continue; // skip unsatisfiable sub-range
+    ranges.push({ start, end });
+  }
+  return ranges.length === 0 ? -1 : ranges;
+}
+
+/** The Express content-negotiation helpers, bound to a request's headers. */
+function reqHelpers(h: Record<string, string>) {
+  return {
+    accepts: (...types: string[]) => accepts(h['accept'], types),
+    acceptsEncodings: (...encs: string[]) => acceptsEncodings(h['accept-encoding'], encs),
+    acceptsLanguages: (...langs: string[]) =>
+      acceptsLanguages(h['accept-language'], langs),
+    is: (...types: string[]) => typeIs(h['content-type'], types),
+    range: (size: number) => parseRangeHeader(h['range'], size),
+  };
+}
 
 /**
  * Eager headers map — Bun's `Headers.forEach()` is a tight native loop (5-15
@@ -265,6 +314,7 @@ export function buildNativeRouteRequest(
     header(name: string) {
       return headers[name.toLowerCase()];
     },
+    ...reqHelpers(headers),
   };
   // Extra Node-isms Nest core touches outside the BunRequest contract.
   Object.assign(req, {
@@ -348,6 +398,7 @@ export async function buildFetchRequest(
     header(name: string) {
       return this.headers[name.toLowerCase()];
     },
+    ...reqHelpers(headers),
   };
   return req;
 }
