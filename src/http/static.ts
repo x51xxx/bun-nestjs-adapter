@@ -1,12 +1,14 @@
 import { promises as fs } from 'fs';
 import { extname, join, normalize, sep } from 'path';
 import { toResponseInit } from './response';
-import { BunResponse } from './types';
+import { BunRequest, BunResponse } from './types';
 
 export interface StaticEntry {
   prefix: string;
   root: string;
   index: string;
+  /** Optional `Cache-Control` value emitted for served files. */
+  cacheControl?: string;
 }
 
 export const STATIC_MIME: Record<string, string> = {
@@ -22,6 +24,12 @@ export const STATIC_MIME: Record<string, string> = {
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
   '.wasm': 'application/wasm',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mp3': 'audio/mpeg',
+  '.pdf': 'application/pdf',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
 };
 
 export interface StaticMatch {
@@ -57,15 +65,69 @@ function finishEmpty(res: BunResponse, status: number): void {
   res._resolve(new Response(null, toResponseInit(res.headers, status)));
 }
 
+/** Weak ETag from size + mtime — matches Express' default `etag` shape closely. */
+function computeEtag(size: number, mtimeMs: number): string {
+  return `W/"${size.toString(16)}-${Math.floor(mtimeMs).toString(16)}"`;
+}
+
+/** `If-None-Match` matcher: `*`, exact, or comma-separated list membership. */
+function etagMatches(ifNoneMatch: string, etag: string): boolean {
+  const trimmed = ifNoneMatch.trim();
+  if (trimmed === '*') return true;
+  return trimmed
+    .split(',')
+    .some(
+      tag =>
+        tag.trim() === etag || tag.trim() === `W/${etag}` || `W/${tag.trim()}` === etag,
+    );
+}
+
 /**
- * Serve a file from a static entry. Returns `true` when the request was
- * handled (file served, or 403 on traversal). Returns `false` on a miss
- * (no such file / path is a directory) so the caller can fall through to
- * route dispatch.
+ * Parse a single-range `Range: bytes=start-end` header against a known size.
+ * Returns the inclusive [start, end] pair, `null` when there is no/!bytes
+ * range header, or `'invalid'` when the range is unsatisfiable (→ 416).
+ * Multi-range requests fall back to a full 200 response (returns `null`).
+ */
+function parseRange(
+  header: string | undefined,
+  size: number,
+): { start: number; end: number } | null | 'invalid' {
+  if (!header || !header.startsWith('bytes=')) return null;
+  const spec = header.slice(6);
+  if (spec.includes(',')) return null; // multi-range — serve full body
+  const dash = spec.indexOf('-');
+  if (dash === -1) return 'invalid';
+  const startStr = spec.slice(0, dash).trim();
+  const endStr = spec.slice(dash + 1).trim();
+
+  let start: number;
+  let end: number;
+  if (startStr === '') {
+    // Suffix range: last N bytes.
+    const suffix = Number(endStr);
+    if (!Number.isFinite(suffix) || suffix <= 0) return 'invalid';
+    start = Math.max(0, size - suffix);
+    end = size - 1;
+  } else {
+    start = Number(startStr);
+    end = endStr === '' ? size - 1 : Number(endStr);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return 'invalid';
+    if (end > size - 1) end = size - 1;
+  }
+  if (start > end || start >= size || start < 0) return 'invalid';
+  return { start, end };
+}
+
+/**
+ * Serve a file from a static entry with conditional-request, byte-range and
+ * caching support. Returns `true` when the request was handled (file served,
+ * 304, 206, 403, or 416). Returns `false` on a miss (no such file / path is a
+ * directory) so the caller can fall through to route dispatch.
  */
 export async function serveStatic(
   matched: StaticMatch,
   res: BunResponse,
+  req?: BunRequest,
 ): Promise<boolean> {
   const safe = normalize(matched.relPath).replace(/^[/\\]+/, '');
   if (safe.includes('..' + sep) || safe === '..') {
@@ -73,28 +135,83 @@ export async function serveStatic(
     return true;
   }
   const filePath = join(matched.entry.root, safe);
+  let stat: Awaited<ReturnType<typeof fs.stat>>;
   try {
-    const stat = await fs.stat(filePath);
-    if (stat.isDirectory()) {
-      return false;
-    }
-    if (typeof Bun === 'undefined' || typeof Bun.file !== 'function') {
-      finishEmpty(res, 500);
-      return true;
-    }
-    const file = Bun.file(filePath);
-    const ext = extname(filePath).toLowerCase();
-    const mime = STATIC_MIME[ext] ?? 'application/octet-stream';
-    res.headers['content-type'] = mime;
-    res.headers['content-length'] = String(stat.size);
-    res.finished = true;
-    res.headersSent = true;
-    res._resolve(new Response(file, toResponseInit(res.headers, res.statusCode || 200)));
-    return true;
+    stat = await fs.stat(filePath);
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
       return false;
     }
     throw err;
   }
+  if (stat.isDirectory()) {
+    return false;
+  }
+  if (typeof Bun === 'undefined' || typeof Bun.file !== 'function') {
+    finishEmpty(res, 500);
+    return true;
+  }
+
+  const size = stat.size;
+  const etag = computeEtag(size, stat.mtimeMs);
+  const lastModified = stat.mtime.toUTCString();
+  const ext = extname(filePath).toLowerCase();
+  const mime = STATIC_MIME[ext] ?? 'application/octet-stream';
+
+  const headers = res.headers;
+  headers['content-type'] = mime;
+  headers['etag'] = etag;
+  headers['last-modified'] = lastModified;
+  headers['accept-ranges'] = 'bytes';
+  if (matched.entry.cacheControl) {
+    headers['cache-control'] = matched.entry.cacheControl;
+  }
+
+  const reqHeaders = req?.headers;
+  const method = req?.method ?? 'GET';
+
+  // Conditional GET — `If-None-Match` wins over `If-Modified-Since` (RFC 9110).
+  const inm = reqHeaders?.['if-none-match'];
+  const ims = reqHeaders?.['if-modified-since'];
+  const notModified =
+    (inm !== undefined && etagMatches(inm, etag)) ||
+    (inm === undefined &&
+      ims !== undefined &&
+      Number.isFinite(Date.parse(ims)) &&
+      stat.mtime.getTime() <= Date.parse(ims) + 999);
+  if (notModified) {
+    finishEmpty(res, 304);
+    return true;
+  }
+
+  const file = Bun.file(filePath);
+
+  // Range request (skip for HEAD — no body to slice).
+  const range = method === 'HEAD' ? null : parseRange(reqHeaders?.['range'], size);
+  if (range === 'invalid') {
+    headers['content-range'] = `bytes */${size}`;
+    finishEmpty(res, 416);
+    return true;
+  }
+
+  res.finished = true;
+  res.headersSent = true;
+
+  if (method === 'HEAD') {
+    headers['content-length'] = String(size);
+    res._resolve(new Response(null, toResponseInit(headers, 200)));
+    return true;
+  }
+
+  if (range) {
+    const { start, end } = range;
+    headers['content-range'] = `bytes ${start}-${end}/${size}`;
+    headers['content-length'] = String(end - start + 1);
+    res._resolve(new Response(file.slice(start, end + 1), toResponseInit(headers, 206)));
+    return true;
+  }
+
+  headers['content-length'] = String(size);
+  res._resolve(new Response(file, toResponseInit(headers, res.statusCode || 200)));
+  return true;
 }

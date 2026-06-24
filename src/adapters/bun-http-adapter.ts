@@ -38,6 +38,10 @@ interface ServeStaticOptions {
   root?: string;
   prefix?: string;
   index?: string;
+  /** `Cache-Control` header value emitted for served files (e.g. `public, max-age=3600`). */
+  cacheControl?: string;
+  /** Shorthand: emits `Cache-Control: public, max-age=<maxAge>` (seconds). */
+  maxAge?: number;
 }
 
 /**
@@ -474,10 +478,14 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       options = rootOrOptions ?? {};
     }
     if (!root) return;
+    const cacheControl =
+      options.cacheControl ??
+      (options.maxAge !== undefined ? `public, max-age=${options.maxAge}` : undefined);
     this.staticAssets.push({
       prefix: options.prefix ?? '/',
       root,
       index: options.index ?? 'index.html',
+      cacheControl,
     });
   }
 
@@ -691,7 +699,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       ) {
         const matched = matchStatic(this.staticAssets, pathname);
         if (matched) {
-          serveStatic(matched, res)
+          serveStatic(matched, res, req)
             .then(handled => {
               if (!handled && !res.finished) {
                 this.dispatchRoutes(req, res, pathname, resolve);
