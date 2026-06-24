@@ -130,6 +130,28 @@ export interface WsUpgradeData {
   server: WsServerShim;
 }
 
+/**
+ * Tuning knobs forwarded verbatim to the `websocket` block of `Bun.serve`.
+ * Defined here (HTTP types, no `@nestjs/websockets` import) so the shared-port
+ * HTTP server can apply them without importing the WS adapter module.
+ */
+export interface BunWsServeOptions {
+  /** Max inbound message size in bytes (default 16 MB). */
+  maxPayloadLength?: number;
+  /** Bytes buffered before a socket is considered backpressured. */
+  backpressureLimit?: number;
+  /** Close the connection when `backpressureLimit` is exceeded. */
+  closeOnBackpressureLimit?: boolean;
+  /** Idle timeout in seconds before an inactive socket is closed. */
+  idleTimeout?: number;
+  /** Deliver a published message back to the publishing socket too. */
+  publishToSelf?: boolean;
+  /** Automatically send pings to keep connections alive. */
+  sendPings?: boolean;
+  /** Per-message-deflate compression level (`false`/`true`/preset string). */
+  perMessageDeflate?: boolean | string | { compress?: unknown; decompress?: unknown };
+}
+
 // Pre-allocated frozen empty maps — reused across requests that don't have
 // query or path params, to skip per-request object allocations.
 export const EMPTY_QUERY: Record<string, string | string[]> = Object.freeze(

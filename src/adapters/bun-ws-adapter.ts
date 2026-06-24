@@ -5,7 +5,7 @@ import { MessageMappingProperties } from '@nestjs/websockets/gateway-metadata-ex
 import type { ServerWebSocket, WebSocketHandler } from 'bun';
 import { EMPTY, Observable, fromEvent } from 'rxjs';
 import { filter, first, mergeMap, share, takeUntil } from 'rxjs/operators';
-import { BunServer, WsUpgradeData } from '../http/types';
+import { BunServer, BunWsServeOptions, WsUpgradeData } from '../http/types';
 
 const CLOSE_EVENT = 'close';
 const ERROR_EVENT = 'error';
@@ -19,8 +19,11 @@ enum READY_STATE {
 
 type WsMessageData = string | Buffer | ArrayBuffer | Buffer[];
 type WsMessageParser = (data: WsMessageData) => { event: string; data: unknown } | void;
-type BunWsAdapterOptions = {
+export type { BunWsServeOptions } from '../http/types';
+export type BunWsAdapterOptions = {
   messageParser?: WsMessageParser;
+  /** Tuning forwarded to Bun's `websocket` block (both shared & standalone). */
+  websocket?: BunWsServeOptions;
 };
 
 interface ServerEntry {
@@ -41,6 +44,7 @@ interface BunHttpAdapterLike {
     | {
         address(): { port: number; address: string; family: string } | string | null;
         bunServer: BunServer | null;
+        wsOptions?: BunWsServeOptions;
       }
     | undefined;
   wsPaths: Map<string, BunWsServer>;
@@ -187,10 +191,12 @@ export class BunWsAdapter extends AbstractWsAdapter<BunWsServer, BunWsClient> {
   private readonly servers = new Map<number, ServerEntry>();
   private messageParser: WsMessageParser = (data: WsMessageData) =>
     JSON.parse(data.toString());
+  private readonly wsOptions: BunWsServeOptions | undefined;
 
   constructor(appOrHttpServer?: object, options?: BunWsAdapterOptions) {
     super(appOrHttpServer);
     if (options?.messageParser) this.messageParser = options.messageParser;
+    this.wsOptions = options?.websocket;
   }
 
   public setMessageParser(parser: WsMessageParser) {
@@ -251,6 +257,12 @@ export class BunWsAdapter extends AbstractWsAdapter<BunWsServer, BunWsClient> {
           'BunWsAdapter requires a BunHttpAdapter when sharing the underlying HTTP port.',
         );
       }
+      // Hand the WS tuning to the HTTP server before it builds its Bun.serve
+      // config at listen(); the shared websocket block reads it there.
+      if (this.wsOptions) {
+        const httpServer = httpAdapter.getHttpServer();
+        if (httpServer) httpServer.wsOptions = this.wsOptions;
+      }
       let server = httpAdapter.wsPaths.get(path);
       if (!server) {
         server = new BunWsServer(path);
@@ -308,7 +320,9 @@ export class BunWsAdapter extends AbstractWsAdapter<BunWsServer, BunWsClient> {
         if (upgraded) return undefined;
         return new Response('Upgrade required', { status: 426 });
       },
-      websocket: STANDALONE_WEBSOCKET_HANDLERS,
+      websocket: this.wsOptions
+        ? { ...STANDALONE_WEBSOCKET_HANDLERS, ...this.wsOptions }
+        : STANDALONE_WEBSOCKET_HANDLERS,
     };
     // Same boundary cast as BunHttpServer.listen — Bun.serve's overloads
     // don't accept a structurally-built config object.

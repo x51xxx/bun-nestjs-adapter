@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import { promises as fs } from 'fs';
 import type { ServerWebSocket, WebSocketHandler } from 'bun';
-import { BunServer, WsUpgradeData } from './types';
+import { BunServer, BunWsServeOptions, WsUpgradeData } from './types';
 
 /**
  * TLS options forwarded verbatim to `Bun.serve({ tls })`. Mirrors Bun's
@@ -77,6 +77,8 @@ export class BunHttpServer extends EventEmitter {
   public idleTimeout: number | undefined = undefined;
   /** SO_REUSEPORT — share the port across processes for load balancing. */
   public reusePort: boolean | undefined = undefined;
+  /** WebSocket tuning forwarded to the `websocket` block (set by BunWsAdapter). */
+  public wsOptions: BunWsServeOptions | undefined = undefined;
 
   constructor(private readonly fetchHandler: FetchHandler) {
     super();
@@ -149,6 +151,10 @@ export class BunHttpServer extends EventEmitter {
       }
       if (this.idleTimeout !== undefined) config.idleTimeout = this.idleTimeout;
       if (this.reusePort !== undefined) config.reusePort = this.reusePort;
+      if (this.wsOptions) {
+        // Bun.serve accepts the tuning fields as siblings of the ws handlers.
+        Object.assign(config.websocket, this.wsOptions);
+      }
       // Single boundary cast: Bun.serve's overloads model unix/port variants
       // as separate option types, which a progressively-built config can't
       // satisfy statically.
