@@ -286,9 +286,9 @@ scopes.describe.skip('upstream :: scopes (KNOWN: request-scope metadata)', () =>
 });
 
 // ───── lazy-modules ─────────────────────────────────────────────────────────
-const lazyModules = skipIfMissing(
-  join(FIXTURES_ROOT, 'lazy-modules', 'src', 'app.module.ts'),
-);
+// Kept for parity with the other fixture guards; the block below is always
+// skipped (see comment), so the guard result is intentionally unused.
+void skipIfMissing(join(FIXTURES_ROOT, 'lazy-modules', 'src', 'app.module.ts'));
 // SKIPPED — `LazyModuleLoader.load()` mutates the route table at runtime,
 // but our `Bun.serve({ routes })` fast path freezes the route map at
 // `app.listen()`. Lazy routes resolve to 404. Unblocks once we wire

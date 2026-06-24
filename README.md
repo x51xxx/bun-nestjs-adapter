@@ -35,12 +35,13 @@ whenever no middleware/static/CORS feature is active.
   `@WebSocketGateway()` with **no port (or the HTTP port) shares the main
   `Bun.serve`** via HTTP upgrade — no second listener; an explicit *different*
   port still spins up its own server.
-- **Microservices (TCP)**: `BunServerTcp` / `BunClientTcp` on top of
-  `Bun.listen()` / `Bun.connect()` instead of `node:net`. Speak the exact
-  length-prefixed JSON framing of Nest's built-in TCP transport, so they are
-  **wire-compatible** with stock `ServerTCP` / `ClientTCP` (mix and match in
-  either direction). Imported from the `/microservices` subpath so the optional
-  `@nestjs/microservices` peer never lands in the HTTP/WS bundle.
+- **Microservices**: `BunServerTcp` / `BunClientTcp` (on `Bun.listen()` /
+  `Bun.connect()`) and `BunServerRedis` / `BunClientRedis` (on `Bun.RedisClient`
+  Pub/Sub) instead of `node:net` / `ioredis`. Both speak Nest's built-in wire
+  formats, so they are **wire-compatible** with stock `ServerTCP`/`ClientTCP` and
+  `ServerRedis`/`ClientRedis` (mix and match in either direction). Imported from
+  the `/microservices` subpath so the optional `@nestjs/microservices` peer never
+  lands in the HTTP/WS bundle.
 
 ## Documentation
 
@@ -188,6 +189,17 @@ Register the client via `ClientsModule` with a `customClass` if you prefer DI:
 ClientsModule.register([
   { name: 'MATH', customClass: BunClientTcp, options: { port: 3001 } },
 ]);
+```
+
+For Redis Pub/Sub, swap in `BunServerRedis` / `BunClientRedis` (same channel
+scheme as Nest's `ServerRedis`, so it interoperates with stock Redis peers):
+
+```ts
+import { BunServerRedis, BunClientRedis } from '@trishchuk/bun-nestjs-adapter/microservices';
+
+// server: new BunServerRedis({ host: 'localhost', port: 6379 })
+const client = new BunClientRedis({ host: 'localhost', port: 6379 });
+const sum = await firstValueFrom(client.send('sum', [1, 2, 3]));
 ```
 
 ## How it stacks up

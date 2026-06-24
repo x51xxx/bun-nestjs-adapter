@@ -28,3 +28,25 @@ export interface BunTcpOptions {
   /** Forwarded to `Bun.listen({ tls })` / `Bun.connect({ tls })`. */
   tls?: TLSOptions;
 }
+
+/**
+ * Options for the native Bun Redis transport ({@link BunServerRedis} /
+ * {@link BunClientRedis}). Built on `Bun.RedisClient` (a.k.a. `Bun.redis`).
+ * Uses Nest's Redis Pub/Sub channel scheme (`pattern` request channel,
+ * `pattern.reply` response channel), so it interoperates with Nest's stock
+ * Redis transport.
+ */
+export interface BunRedisOptions {
+  /** Full connection URL (wins over host/port), e.g. `redis://localhost:6379`. */
+  url?: string;
+  host?: string;
+  port?: number;
+  serializer?: Serializer;
+  deserializer?: Deserializer;
+}
+
+/** Resolve a `redis://` URL from `{ url | host + port }` (defaults to localhost:6379). */
+export function resolveRedisUrl(options: BunRedisOptions): string {
+  if (options.url) return options.url;
+  return `redis://${options.host ?? 'localhost'}:${options.port ?? 6379}`;
+}

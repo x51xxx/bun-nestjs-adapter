@@ -15,7 +15,7 @@ Key capabilities:
 - Server-Sent Events (`@Sse()`).
 - File uploads via `BunFileInterceptor`, `BunFilesInterceptor`, `BunAnyFilesInterceptor` using native `Request.formData()`.
 - WebSocket via `BunWsAdapter` with Bun's native pub/sub (`subscribe` / `unsubscribe` / `publish`).
-- Microservices TCP transport (`BunServerTcp` / `BunClientTcp`) on `Bun.listen()` / `Bun.connect()`, wire-compatible with Nest's built-in TCP transport. Shipped from the **separate** `/microservices` entry point so the optional `@nestjs/microservices` peer never enters the main bundle.
+- Microservices transports, wire-compatible with Nest's built-in transports: **TCP** (`BunServerTcp`/`BunClientTcp`) on `Bun.listen()`/`Bun.connect()`, and **Redis** (`BunServerRedis`/`BunClientRedis`) on `Bun.RedisClient` Pub/Sub. Shipped from the **separate** `/microservices` entry point so the optional `@nestjs/microservices` peer never enters the main bundle.
 
 Runtime requirement: **Bun ≥ 1.2.0** (engines field says `>=1.2.0`; CI pins `1.3.5`).
 
@@ -66,8 +66,10 @@ src/                          # Published source
     json-socket.ts            # BunJsonSocket — length-prefixed JSON framing over Bun TCP
     server-tcp.ts             # BunServerTcp — CustomTransportStrategy on Bun.listen()
     client-tcp.ts             # BunClientTcp — ClientProxy on Bun.connect()
-    types.ts                  # BunTcpOptions + NO_MESSAGE_HANDLER
-    index.ts                  # Re-exports the TCP transport
+    server-redis.ts           # BunServerRedis — CustomTransportStrategy on Bun.RedisClient pub/sub
+    client-redis.ts           # BunClientRedis — ClientProxy on Bun.RedisClient pub/sub
+    types.ts                  # BunTcpOptions / BunRedisOptions + NO_MESSAGE_HANDLER
+    index.ts                  # Re-exports the TCP + Redis transports
   index.ts                    # Package entrypoint — exports adapters + interceptors
 
 tests/

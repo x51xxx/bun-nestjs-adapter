@@ -7,7 +7,9 @@
  */
 export { BunServerTcp } from './server-tcp';
 export { BunClientTcp } from './client-tcp';
+export { BunServerRedis } from './server-redis';
+export { BunClientRedis } from './client-redis';
 export { BunJsonSocket } from './json-socket';
 export type { BunJsonSocketOptions } from './json-socket';
 export { NO_MESSAGE_HANDLER } from './types';
-export type { BunTcpOptions } from './types';
+export type { BunTcpOptions, BunRedisOptions } from './types';
