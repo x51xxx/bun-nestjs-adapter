@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import { STATUS_CODES } from 'node:http';
 import { signCookie } from './cookies';
 import {
   BunRequest,
@@ -47,6 +48,41 @@ export function toResponseInit(headers: BunResponseHeaders, status: number) {
     }
   }
   return { status, headers: initHeaders };
+}
+
+/** Weak `If-None-Match` membership (the `W/` prefix is ignored, per RFC 9110). */
+function etagInList(header: string, etag: string): boolean {
+  const bare = etag.startsWith('W/') ? etag.slice(2) : etag;
+  return header.split(',').some(part => {
+    const tag = part.trim();
+    return (tag.startsWith('W/') ? tag.slice(2) : tag) === bare;
+  });
+}
+
+/**
+ * RFC 9110 freshness — mirrors the `fresh` npm module. Fresh when a cache
+ * validator (`If-None-Match` / `If-Modified-Since`) still matches the response.
+ */
+function computeFresh(req: BunRequest, res: BunResponse): boolean {
+  const method = req.method;
+  if (method !== 'GET' && method !== 'HEAD') return false;
+  const status = res.statusCode;
+  if (!((status >= 200 && status < 300) || status === 304)) return false;
+
+  const inm = req.headers['if-none-match'];
+  const ims = req.headers['if-modified-since'];
+  if (!inm && !ims) return false;
+
+  if (inm && inm !== '*') {
+    const etag = res.headers['etag'];
+    if (!etag || !etagInList(inm, Array.isArray(etag) ? etag[0] : etag)) return false;
+  }
+  if (ims) {
+    const lm = res.headers['last-modified'];
+    const lastModified = Array.isArray(lm) ? lm[0] : lm;
+    if (!lastModified || Date.parse(lastModified) > Date.parse(ims)) return false;
+  }
+  return true;
 }
 
 function errorMessage(err: unknown): string {
@@ -243,6 +279,20 @@ export function makeBunResponse(
       for (const v of values) adapter.appendHeader(this, name, v);
       return this;
     },
+    sendStatus(code: number) {
+      this.statusCode = code;
+      this.headers['content-type'] = 'text/plain; charset=utf-8';
+      adapter.reply(this, STATUS_CODES[code] || String(code));
+      return this;
+    },
+    links(links: Record<string, string>) {
+      const value = Object.entries(links)
+        .map(([rel, url]) => `<${url}>; rel="${rel}"`)
+        .join(', ');
+      const existing = this.headers['link'];
+      this.headers['link'] = existing ? `${existing}, ${value}` : value;
+      return this;
+    },
     download(
       path: string,
       filename?: string,
@@ -257,6 +307,19 @@ export function makeBunResponse(
       adapter.sendFile(this, path, options, cb);
     },
   };
+  // Wire the back-reference and live freshness getters now that `res` exists
+  // (request builders seed `fresh`/`stale` with placeholders).
+  req.res = res;
+  Object.defineProperty(req, 'fresh', {
+    configurable: true,
+    enumerable: true,
+    get: () => computeFresh(req, res),
+  });
+  Object.defineProperty(req, 'stale', {
+    configurable: true,
+    enumerable: true,
+    get: () => !computeFresh(req, res),
+  });
   attachWritableShim(res, resolve);
   return res;
 }

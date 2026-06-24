@@ -26,7 +26,8 @@ whenever no middleware/static/CORS feature is active.
   `compression` (gzip/deflate/zstd), `etag` (auto weak/strong + `If-None-Match` → 304).
 - **Connection info**: real `req.ip` (`server.requestIP()`), `req.ips` / `req.protocol` / `req.secure`.
 - **Content negotiation**: `req.accepts` / `acceptsEncodings` / `acceptsLanguages` / `is` / `range`,
-  and `res.format` / `jsonp` / `attachment` / `location` / `vary` / `append`.
+  and `res.format` / `jsonp` / `attachment` / `location` / `vary` / `append` / `sendStatus` / `links`.
+- **Express request extras**: `req.xhr` / `req.subdomains` / `req.fresh` / `req.stale`.
 - **Streaming**: `StreamableFile` and bare Node `Readable` returns are converted
   to a Web `ReadableStream` and piped through `Bun.serve`.
 - **Server-Sent Events** (`@Sse()`) — the response carries a Node-`Writable`

@@ -39,8 +39,19 @@ function parseRangeHeader(header: string | undefined, size: number): RangeParseR
   return ranges.length === 0 ? -1 : ranges;
 }
 
-/** The Express content-negotiation helpers, bound to a request's headers. */
-function reqHelpers(h: Record<string, string>) {
+/** Express subdomains (offset 2), e.g. `api.x.example.com` → `['x', 'api']`. */
+function computeSubdomains(hostname: string): string[] {
+  if (!hostname || /^[\d.]+$/.test(hostname) || hostname.includes(':')) return [];
+  const parts = hostname.split('.').reverse();
+  return parts.slice(2);
+}
+
+/**
+ * The Express content-negotiation + connection helpers, bound to a request's
+ * headers / hostname. `fresh` / `stale` / `res` are placeholders here and are
+ * replaced with live getters in `makeBunResponse` once the response exists.
+ */
+function reqHelpers(h: Record<string, string>, hostname: string) {
   return {
     accepts: (...types: string[]) => accepts(h['accept'], types),
     acceptsEncodings: (...encs: string[]) => acceptsEncodings(h['accept-encoding'], encs),
@@ -48,6 +59,11 @@ function reqHelpers(h: Record<string, string>) {
       acceptsLanguages(h['accept-language'], langs),
     is: (...types: string[]) => typeIs(h['content-type'], types),
     range: (size: number) => parseRangeHeader(h['range'], size),
+    xhr: (h['x-requested-with'] || '').toLowerCase() === 'xmlhttprequest',
+    subdomains: computeSubdomains(hostname),
+    fresh: false,
+    stale: true,
+    res: undefined,
   };
 }
 
@@ -314,7 +330,7 @@ export function buildNativeRouteRequest(
     header(name: string) {
       return headers[name.toLowerCase()];
     },
-    ...reqHelpers(headers),
+    ...reqHelpers(headers, hostname),
   };
   // Extra Node-isms Nest core touches outside the BunRequest contract.
   Object.assign(req, {
@@ -398,7 +414,7 @@ export async function buildFetchRequest(
     header(name: string) {
       return this.headers[name.toLowerCase()];
     },
-    ...reqHelpers(headers),
+    ...reqHelpers(headers, hostname),
   };
   return req;
 }

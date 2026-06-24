@@ -16,7 +16,10 @@ Expand HTTP/WS feature coverage, mostly on native Bun primitives:
   range/conditional/caching support.
 - **Content negotiation**: `req.accepts` / `acceptsEncodings` / `acceptsLanguages`
   / `is` / `range`, and `res.format` / `jsonp` / `attachment` / `location` /
-  `vary` / `append`.
+  `vary` / `append` / `sendStatus` / `links`. Plus `req.xhr` / `req.subdomains`
+  / `req.fresh` / `req.stale`.
+- **Compression** also covers Brotli (`br`) with q-aware Accept-Encoding
+  negotiation (server preference `br` > `gzip` > `zstd` > `deflate`).
 - **Cookies** parsed via `Bun.CookieMap` (native), keeping signed + JSON support.
 - **WebSocket tuning** (`BunWsAdapter` `{ websocket }`): `maxPayloadLength`,
   `perMessageDeflate`, `idleTimeout`, `backpressureLimit`, `sendPings`, etc.

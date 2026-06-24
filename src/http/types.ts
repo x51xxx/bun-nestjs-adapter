@@ -40,6 +40,16 @@ export interface BunRequest {
   is(...types: string[]): string | false | null;
   /** Parse the `Range` header against `size`: ranges array, `-1`, `-2`, or `undefined`. */
   range(size: number): RangeParseResult;
+  /** `true` when `X-Requested-With: XMLHttpRequest`. */
+  xhr: boolean;
+  /** Subdomains of the hostname (Express, offset 2), e.g. `api.x.com` → `['api']`. */
+  subdomains: string[];
+  /** `true` when the response is still fresh per the request's cache validators. */
+  fresh: boolean;
+  /** Inverse of {@link fresh}. */
+  stale: boolean;
+  /** Back-reference to the response, wired by `makeBunResponse`. */
+  res?: BunResponse;
 }
 
 /** A satisfiable byte-range list (carries `type`, like Express' `req.range`). */
@@ -125,6 +135,10 @@ export interface BunResponse {
   vary(field: string | string[]): BunResponse;
   /** Append a value to a (possibly multi-valued) response header. */
   append(name: string, value: string | string[]): BunResponse;
+  /** Set the status code and send its standard reason phrase as the body. */
+  sendStatus(code: number): BunResponse;
+  /** Set the `Link` response header from a `{ rel: url }` map. */
+  links(links: Record<string, string>): BunResponse;
 }
 
 export type BunRouteHandler = (
