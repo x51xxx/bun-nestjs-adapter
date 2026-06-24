@@ -49,6 +49,30 @@ const EMPTY_COOKIES = Object.freeze({
   signedCookies: EMPTY_COOKIE_MAP,
 });
 
+/**
+ * Tokenize a `Cookie` header into decoded `[name, value]` pairs. Prefers Bun's
+ * native `Bun.CookieMap` (RFC 6265 parsing + percent-decoding in C++); falls
+ * back to a manual split when running outside Bun. Note the two paths differ on
+ * malformed percent-escapes: `CookieMap` yields the Unicode replacement char,
+ * the fallback leaves the raw `%xx` text — both avoid throwing on bad input.
+ */
+function tokenizeCookies(header: string): [string, string][] {
+  const BunGlobal = (globalThis as { Bun?: { CookieMap?: unknown } }).Bun;
+  if (BunGlobal && typeof BunGlobal.CookieMap === 'function') {
+    return [...new Bun.CookieMap(header)];
+  }
+  const out: [string, string][] = [];
+  for (const pair of header.split(';')) {
+    const idx = pair.indexOf('=');
+    if (idx === -1) continue;
+    out.push([
+      safeDecodeURIComponent(pair.slice(0, idx).trim()),
+      safeDecodeURIComponent(pair.slice(idx + 1).trim()),
+    ]);
+  }
+  return out;
+}
+
 export function parseCookies(
   cookieHeader: string | undefined,
   secret: string | null,
@@ -57,14 +81,8 @@ export function parseCookies(
 
   const cookies: Record<string, unknown> = Object.create(null);
   const signedCookies: Record<string, unknown> = Object.create(null);
-  const pairs = cookieHeader.split(';');
-  for (let i = 0; i < pairs.length; i++) {
-    const pair = pairs[i];
-    const idx = pair.indexOf('=');
-    if (idx === -1) continue;
-    const key = safeDecodeURIComponent(pair.slice(0, idx).trim());
-    const val = safeDecodeURIComponent(pair.slice(idx + 1).trim());
 
+  for (const [key, val] of tokenizeCookies(cookieHeader)) {
     if (secret && val.startsWith('s:')) {
       const unsigned = unsignCookie(val, secret);
       if (unsigned !== false) {
