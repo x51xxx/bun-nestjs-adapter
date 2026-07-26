@@ -40,23 +40,68 @@ function errorMessage(err: unknown): string {
   return 'Internal Server Error';
 }
 
+/**
+ * Per-response settle state, shared between `makeBunResponse` and the writable
+ * shim. `settled` is the single source of truth for "the `Promise<Response>`
+ * handed to Bun has been resolved" — the older code inferred it from
+ * `finished`/`headersSent`, which the streaming upgrade set inconsistently and
+ * which let error paths resolve an already-settled promise (a silent no-op)
+ * instead of failing the request. That left the connection open forever.
+ */
+interface ResponseState {
+  settled: boolean;
+  streamCtrl: ReadableStreamDefaultController<Uint8Array> | null;
+  /**
+   * HEAD-request mode: the response settled headers-only and every subsequent
+   * write is swallowed. A HEAD response carries no body by definition, so
+   * handing Bun a `ReadableStream` nobody drains would queue chunks forever —
+   * which is exactly what an `@Sse()` route reached over HEAD did.
+   */
+  discarded: boolean;
+}
+
 export function makeBunResponse(
   adapter: ResponseAdapter,
   req: BunRequest,
   resolve: (r: Response) => void,
 ): BunResponse {
+  const state: ResponseState = { settled: false, streamCtrl: null, discarded: false };
+  // Every exit point goes through here, so the response can only settle once.
+  const settle = (r: Response) => {
+    if (state.settled) return;
+    state.settled = true;
+    resolve(r);
+  };
+
   const res: BunResponse = {
     statusCode: 200,
     headers: Object.create(null) as BunResponseHeaders,
     body: undefined,
     headersSent: false,
     finished: false,
-    _resolve: resolve,
+    get _streaming() {
+      return state.streamCtrl !== null;
+    },
+    _resolve: settle,
     _reject(err: unknown) {
-      if (this.finished) return;
+      // Already streaming: the status line and headers are on the wire, so a
+      // 500 body is no longer possible. Erroring the stream aborts the chunked
+      // response, which is the only way left to tell the client it failed —
+      // and, critically, it terminates the request instead of hanging it.
+      if (state.streamCtrl) {
+        this.finished = true;
+        try {
+          state.streamCtrl.error(
+            err instanceof Error ? err : new Error(errorMessage(err)),
+          );
+        } catch {}
+        state.streamCtrl = null;
+        return;
+      }
+      if (this.finished || state.settled) return;
       this.finished = true;
       this.headersSent = true;
-      resolve(
+      settle(
         Response.json(
           {
             statusCode: 500,
@@ -147,7 +192,7 @@ export function makeBunResponse(
       return this.cookie(name, '', opts);
     },
   };
-  attachWritableShim(res, resolve);
+  attachWritableShim(res, state, settle);
   return res;
 }
 
@@ -199,32 +244,62 @@ function toBytes(chunk: unknown): Uint8Array {
  * actually called, the response stays in the cheap buffered mode; the first
  * `write`/`writeHead`/`flushHeaders` upgrades it to a streaming Response.
  */
-function attachWritableShim(res: BunResponse, resolve: (r: Response) => void): void {
-  let streamCtrl: ReadableStreamDefaultController<Uint8Array> | null = null;
+function attachWritableShim(
+  res: BunResponse,
+  state: ResponseState,
+  settle: (r: Response) => void,
+): void {
   const emitter = new EventEmitter();
 
   const ensureStreaming = () => {
-    if (streamCtrl) return;
+    if (state.streamCtrl || state.discarded) return;
+    // HEAD must not carry a body. Since `HEAD` falls back to the `GET` handler,
+    // a streaming route (SSE, StreamableFile) would otherwise hand Bun a stream
+    // it never reads — the source keeps producing into a buffer nobody drains
+    // and never tears down. Settle headers-only and tell the handler the client
+    // is gone so its subscription unwinds.
+    if (res.req?.method === 'HEAD') {
+      state.discarded = true;
+      res.headersSent = true;
+      res.finished = true;
+      settle(new Response(null, toResponseInit(res.headers, res.statusCode || 200)));
+      // Deferred: emitting synchronously would re-enter a handler that is
+      // mid-write (Nest's SseStream calls write() then inspects the response).
+      queueMicrotask(() => {
+        (res.req as unknown as { emit?(event: string): boolean }).emit?.('close');
+      });
+      return;
+    }
+    // `start` runs synchronously inside the constructor, so `state.streamCtrl`
+    // is populated before we settle — `_reject` can rely on it immediately.
     const stream = new ReadableStream<Uint8Array>({
       start(c) {
-        streamCtrl = c;
+        state.streamCtrl = c;
       },
     });
     res.headersSent = true;
-    resolve(new Response(stream, toResponseInit(res.headers, res.statusCode || 200)));
+    settle(new Response(stream, toResponseInit(res.headers, res.statusCode || 200)));
   };
 
   const r = res as BunResponse & NodeWritableShim;
   r.write = (chunk, encodingOrCb, cb) => {
     let callback = cb;
     if (typeof encodingOrCb === 'function') callback = encodingOrCb;
-    if (r.finished) {
+    // `discarded` implies `finished`, so it has to be checked first — a HEAD
+    // response is deliberately settled early and keeps accepting writes.
+    if (r.finished && !state.discarded) {
       callback?.(new Error('write after end'));
       return false;
     }
     ensureStreaming();
+    if (state.discarded) {
+      // HEAD: report success so the producer doesn't treat it as a write
+      // error, but drop the bytes — the response is headers-only.
+      callback?.();
+      return true;
+    }
     try {
-      streamCtrl!.enqueue(toBytes(chunk));
+      state.streamCtrl!.enqueue(toBytes(chunk));
     } catch (err) {
       callback?.(err as Error);
       return false;
@@ -249,17 +324,20 @@ function attachWritableShim(res: BunResponse, resolve: (r: Response) => void): v
       callback?.();
       return r;
     }
-    if (streamCtrl) {
+    if (state.streamCtrl) {
       // Already in streaming mode — flush remaining chunk + close.
       if (chunk !== undefined) r.write(chunk);
       try {
-        streamCtrl.close();
+        state.streamCtrl.close();
       } catch {}
+      // Clear it so a later `_reject` doesn't try to error a closed controller
+      // and instead takes the "already finished" early return.
+      state.streamCtrl = null;
     } else {
-      // Non-streaming path: resolve a single buffered Response.
+      // Non-streaming path: settle a single buffered Response.
       r.finished = true;
       r.headersSent = true;
-      resolve(
+      settle(
         new Response(
           (chunk as BodyInit | undefined) ?? null,
           toResponseInit(r.headers, r.statusCode || 200),

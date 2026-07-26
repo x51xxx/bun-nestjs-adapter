@@ -44,6 +44,48 @@ export interface RequestShimContext {
   bodyParserEnabled: boolean;
   rawBodyEnabled: boolean;
   cookieSecret: string | null;
+  /**
+   * When true, `req.ip` prefers the left-most `X-Forwarded-For` entry over the
+   * real peer address. Off by default: the header is client-controlled, so
+   * trusting it unconditionally lets anyone forge the key that rate limiters
+   * and audit logs are built on. Enable via `setTrustProxy(true)` when the app
+   * genuinely sits behind a proxy that rewrites the header.
+   */
+  trustProxy: boolean;
+}
+
+/** Bun's peer-address lookup, available on both dispatch paths. */
+export interface RequestIpSource {
+  requestIP(req: Request): { address: string } | null;
+}
+
+/**
+ * Resolve the client IP lazily — `server.requestIP()` is a native call we don't
+ * want on the hot path for the (many) handlers that never read `req.ip`.
+ *
+ * IPv4-mapped IPv6 (`::ffff:127.0.0.1`) is unwrapped so the value matches what
+ * the Express adapter reports.
+ */
+function makeIpGetter(
+  raw: Request,
+  headers: Record<string, string>,
+  ctx: RequestShimContext,
+  server: RequestIpSource | undefined,
+): () => string {
+  let cached: string | undefined;
+  return () => {
+    if (cached !== undefined) return cached;
+    if (ctx.trustProxy) {
+      const forwarded = headers['x-forwarded-for'];
+      if (forwarded) {
+        const first = forwarded.split(',', 1)[0].trim();
+        if (first) return (cached = first);
+      }
+    }
+    const address = server?.requestIP(raw)?.address;
+    cached = address ? address.replace(/^::ffff:/, '') : '127.0.0.1';
+    return cached;
+  };
 }
 
 export interface ParsedBody {
@@ -137,56 +179,43 @@ export interface NativeRouteRequest extends Request {
 }
 
 /**
- * Convert a Bun.serve route request (already carries `.params`) into the shim
- * our handlers expect. Body parsing stays lazy: `req.body` is filled in by
- * `maybeParseBody()` before handler invocation when the route can have one.
+ * The one place a `BunRequest` is constructed. Both dispatch paths funnel
+ * through it so the shim can't drift again: the native-routes fast path and
+ * the manual `fetch` dispatcher differ only in where `params` comes from and
+ * in *when* the body is parsed — never in which Node-isms are present.
+ *
+ * (Before this was unified, only the fast path grafted on the EventEmitter and
+ * `socket`, so `RouterResponseController.sse()` — which calls
+ * `request.on('close', …)` unconditionally — 500'd on every app that had any
+ * middleware, static mount or CORS registered.)
  */
-export function buildNativeRouteRequest(
-  bunReq: NativeRouteRequest,
+function createRequestShim(
+  raw: Request,
+  method: string,
+  pathname: string,
+  fullPath: string,
+  headers: Record<string, string>,
+  query: Record<string, string | string[]>,
+  params: Record<string, string>,
+  body: unknown,
+  rawBody: Buffer | undefined,
   ctx: RequestShimContext,
+  server: RequestIpSource | undefined,
 ): BunRequest {
-  const params = bunReq.params ?? EMPTY_PARAMS;
-  const headers = buildHeaders(bunReq.headers);
-  const method = bunReq.method;
-  const url = bunReq.url;
-  const queryStart = url.indexOf('?', 8);
-  const pathStart = url.indexOf('/', 8);
-  const pathname =
-    pathStart === -1
-      ? '/'
-      : queryStart === -1
-        ? url.slice(pathStart)
-        : url.slice(pathStart, queryStart);
-  const query = queryStart === -1 ? EMPTY_QUERY : parseQuery(url.slice(queryStart + 1));
-  const fullPath = url.slice(pathStart === -1 ? 0 : pathStart);
   const hostHeader = headers['host'];
   const hostname = hostHeader ? hostHeader.split(':', 1)[0] : '';
-
-  let bodyResolved: unknown = undefined;
-  let bodyConsumed = false;
-
-  const ensureBody = () => {
-    if (bodyConsumed) return bodyResolved;
-    if (!ctx.bodyParserEnabled || method === 'GET' || method === 'HEAD' || !bunReq.body) {
-      bodyConsumed = true;
-      return undefined;
-    }
-    // The canonical `req.body` is filled in before handler invocation via
-    // `maybeParseBody()`; this sync getter only covers reads that happen
-    // before parsing (returns undefined).
-    return bodyResolved;
-  };
+  const parsedCookies = parseCookies(headers['cookie'], ctx.cookieSecret);
+  const ipGetter = makeIpGetter(raw, headers, ctx, server);
 
   const reqEmitter = new EventEmitter();
   // Bridge Bun's AbortSignal → Node-style 'close' event so that
   // RouterResponseController.sse() can subscribe via `req.on('close', …)`.
-  if (bunReq.signal && !bunReq.signal.aborted) {
-    bunReq.signal.addEventListener('abort', () => reqEmitter.emit('close'), {
+  if (raw.signal && !raw.signal.aborted) {
+    raw.signal.addEventListener('abort', () => reqEmitter.emit('close'), {
       once: true,
     });
   }
 
-  const parsedCookies = parseCookies(headers['cookie'], ctx.cookieSecret);
   const req: BunRequest = {
     method,
     url: fullPath,
@@ -194,24 +223,20 @@ export function buildNativeRouteRequest(
     baseUrl: '',
     path: pathname,
     hostname,
-    ip: '127.0.0.1',
+    get ip() {
+      return ipGetter();
+    },
     headers,
     params,
     query,
+    body,
+    rawBody,
     cookies: parsedCookies.cookies,
     signedCookies: parsedCookies.signedCookies,
-    get body() {
-      return ensureBody();
-    },
-    set body(v: unknown) {
-      bodyConsumed = true;
-      bodyResolved = v;
-    },
-    rawBody: undefined,
     // Original Web Request — exposed under a non-`raw` key so it doesn't
     // collide with Nest core's Fastify-style `(req as any).raw || req`
     // fallback used in router-execution-context.ts (SSE / render paths).
-    bunRequest: bunReq,
+    bunRequest: raw,
     get(name: string) {
       return headers[name.toLowerCase()];
     },
@@ -234,6 +259,44 @@ export function buildNativeRouteRequest(
 }
 
 /**
+ * Convert a Bun.serve route request (already carries `.params`) into the shim
+ * our handlers expect. Body parsing stays lazy: `req.body` is filled in by
+ * `maybeParseBody()` before handler invocation when the route can have one.
+ */
+export function buildNativeRouteRequest(
+  bunReq: NativeRouteRequest,
+  ctx: RequestShimContext,
+  server?: RequestIpSource,
+): BunRequest {
+  const headers = buildHeaders(bunReq.headers);
+  const url = bunReq.url;
+  const queryStart = url.indexOf('?', 8);
+  const pathStart = url.indexOf('/', 8);
+  const pathname =
+    pathStart === -1
+      ? '/'
+      : queryStart === -1
+        ? url.slice(pathStart)
+        : url.slice(pathStart, queryStart);
+  const query = queryStart === -1 ? EMPTY_QUERY : parseQuery(url.slice(queryStart + 1));
+  const fullPath = url.slice(pathStart === -1 ? 0 : pathStart);
+
+  return createRequestShim(
+    bunReq,
+    bunReq.method,
+    pathname,
+    fullPath,
+    headers,
+    query,
+    bunReq.params ?? EMPTY_PARAMS,
+    undefined,
+    undefined,
+    ctx,
+    server,
+  );
+}
+
+/**
  * Build the request shim for the manual `fetch` dispatcher. `pathname`,
  * `fullPath` and `queryStart` are pre-computed by the caller's cheap URL
  * split so the raw URL is only scanned once.
@@ -245,6 +308,7 @@ export async function buildFetchRequest(
   rawUrl: string,
   queryStart: number,
   ctx: RequestShimContext,
+  server?: RequestIpSource,
 ): Promise<BunRequest> {
   const method = raw.method;
   const headers = buildHeaders(raw.headers);
@@ -270,32 +334,17 @@ export async function buildFetchRequest(
     rawBody = parsed.rawBody;
   }
 
-  const hostHeader = headers['host'];
-  const hostname = hostHeader ? hostHeader.split(':', 1)[0] : '';
-
-  const parsedCookies = parseCookies(headers['cookie'], ctx.cookieSecret);
-  const req: BunRequest = {
+  return createRequestShim(
+    raw,
     method,
-    url: fullPath,
-    originalUrl: fullPath,
-    baseUrl: '',
-    path: pathname,
-    hostname,
-    ip: headers['x-forwarded-for']?.split(',', 1)[0].trim() ?? '127.0.0.1',
+    pathname,
+    fullPath,
     headers,
-    params: EMPTY_PARAMS,
     query,
+    EMPTY_PARAMS,
     body,
     rawBody,
-    cookies: parsedCookies.cookies,
-    signedCookies: parsedCookies.signedCookies,
-    bunRequest: raw,
-    get(name: string) {
-      return this.headers[name.toLowerCase()];
-    },
-    header(name: string) {
-      return this.headers[name.toLowerCase()];
-    },
-  };
-  return req;
+    ctx,
+    server,
+  );
 }

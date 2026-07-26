@@ -10,8 +10,14 @@ import {
   buildNativeRouteRequest,
   maybeParseBody,
 } from '../http/request';
-import { makeBunResponse, toResponseInit } from '../http/response';
-import { BunRouterInstance, CompiledRoute, toBunRoutePath } from '../http/router';
+import { NodeWritableShim, makeBunResponse, toResponseInit } from '../http/response';
+import {
+  BunRouterInstance,
+  CompiledRoute,
+  bunRoutesLoseParams,
+  matchesPathPrefix,
+  toBunRoutePath,
+} from '../http/router';
 import { BunHttpServer, BunNativeRouteHandler, BunNativeRoutes } from '../http/server';
 import { StaticEntry, matchStatic, serveStatic } from '../http/static';
 import {
@@ -61,6 +67,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     bodyParserEnabled: false,
     rawBodyEnabled: false,
     cookieSecret: null,
+    trustProxy: false,
   };
   private corsOptions: CorsOptions | null = null;
   private notFoundHandler: BunRouteHandler | null = null;
@@ -133,6 +140,13 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
   private buildBunRoutes(): BunNativeRoutes {
     const out: BunNativeRoutes = {};
     for (const [path, methodMap] of this.router.byPath) {
+      // Bun's matcher accepts `*name` but hands back an empty `params`, so a
+      // named wildcard would silently lose its capture here while the manual
+      // dispatcher resolves it correctly. Leaving the path out of the native
+      // map makes Bun fall through to `fetch`, which routes it through our own
+      // regex matcher — same handler, same params, on both paths.
+      if (bunRoutesLoseParams(path)) continue;
+
       const bunPath = toBunRoutePath(path);
       const methodHandler: Record<string, BunNativeRouteHandler> = {};
       for (const [method, handlers] of methodMap) {
@@ -143,16 +157,24 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
         // to the `fetch` callback (which then renders our 404 JSON).
         if (handlers.length === 1 && method !== 'ALL') {
           const h = handlers[0];
-          methodHandler[method] = req => this.runBunRouteSingle(req, h);
+          methodHandler[method] = (req, server) => this.runBunRouteSingle(req, h, server);
         } else {
-          methodHandler[method] = req => this.runBunRouteChain(req, handlers);
+          methodHandler[method] = (req, server) =>
+            this.runBunRouteChain(req, handlers, server);
         }
       }
+      // HEAD falls back to the GET handler, matching Express and Fastify.
+      // Bun strips the body from a HEAD response itself, so the handler needs
+      // no special casing — health checks and `curl -I` used to get a 404.
+      if (!methodHandler.HEAD && methodMap.has('GET')) {
+        methodHandler.HEAD = methodHandler.GET;
+      }
+
       // ALL handlers are invoked for any method that has no explicit entry.
       const allHandlers = methodMap.get('ALL');
       if (allHandlers && allHandlers.length) {
         // Collapse ALL into the wildcard form Bun expects (default route).
-        out[bunPath] = req => {
+        out[bunPath] = (req, server) => {
           // Try method-specific first when present (Bun won't dispatch them
           // because we register the same path twice — instead we attach all
           // logic here).
@@ -160,7 +182,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
           const queue = methodSpecific
             ? [...methodSpecific, ...allHandlers]
             : allHandlers;
-          return this.runBunRouteChain(req, queue);
+          return this.runBunRouteChain(req, queue, server);
         };
       } else {
         out[bunPath] = methodHandler;
@@ -269,6 +291,23 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     if (response.finished) return;
     if (statusCode !== undefined) response.statusCode = statusCode;
 
+    // Handler already called `res.write()` — headers are on the wire and the
+    // buffered path can no longer settle anything. Append and close instead of
+    // silently dropping the body (which is what a second `_resolve` did).
+    if (response._streaming === true) {
+      const w = response as BunResponse & NodeWritableShim;
+      response.body = body;
+      if (body !== undefined && body !== null) {
+        w.write(
+          typeof body === 'string' || body instanceof Uint8Array
+            ? body
+            : JSON.stringify(body),
+        );
+      }
+      w.end();
+      return;
+    }
+
     if (body !== null && typeof body === 'object') {
       // StreamableFile — Nest's wrapper around a Node Readable stream.
       // Convert to a web ReadableStream and stream it back through Bun.serve.
@@ -357,6 +396,10 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
 
   public end(response: BunResponse, message?: string) {
     if (response.finished) return;
+    if (response._streaming === true) {
+      (response as BunResponse & NodeWritableShim).end(message);
+      return;
+    }
     response.finished = true;
     response.headersSent = true;
     response._resolve(
@@ -465,6 +508,19 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     this.corsOptions = options ?? {};
   }
 
+  /**
+   * Opt in to deriving `req.ip` from the left-most `X-Forwarded-For` entry.
+   * Equivalent to Express' `app.set('trust proxy', true)`. Off by default —
+   * the header is client-supplied, so trusting it without a proxy in front
+   * lets any caller forge the identity that rate limiters and audit logs key
+   * on. With it off, `req.ip` is the real peer address from
+   * `Bun.serve`'s `server.requestIP()`.
+   */
+  public setTrustProxy(trust = true) {
+    this.shimCtx.trustProxy = trust;
+    return this;
+  }
+
   public enableCookieParser(secret?: string) {
     this.shimCtx.cookieSecret = secret || null;
     return this;
@@ -507,11 +563,12 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
   private runBunRouteSingle(
     bunReq: Request,
     handler: BunRouteHandler,
+    server?: BunServer,
   ): Promise<Response> | undefined {
     if (bunReq.headers.get('upgrade')?.toLowerCase() === 'websocket') {
       return undefined;
     }
-    const req = buildNativeRouteRequest(bunReq, this.shimCtx);
+    const req = buildNativeRouteRequest(bunReq, this.shimCtx, server);
     const m = req.method;
     // Hot path: GET/HEAD without body parser — skip the async wrapper entirely.
     if (m === 'GET' || m === 'HEAD' || !this.shimCtx.bodyParserEnabled) {
@@ -527,7 +584,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       const res = makeBunResponse(this, req, resolve);
       try {
         const ret = handler(req, res, () => {
-          if (!res.finished) this.dispatchNotFound(req, res, resolve);
+          if (!res.finished) this.dispatchNotFound(req, res);
         });
         if (isThenable(ret)) {
           ret.catch(err => res._reject(err));
@@ -546,11 +603,12 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
   private async runBunRouteChain(
     bunReq: Request,
     handlers: BunRouteHandler[],
+    server?: BunServer,
   ): Promise<Response | undefined> {
     if (bunReq.headers.get('upgrade')?.toLowerCase() === 'websocket') {
       return undefined;
     }
-    const req = buildNativeRouteRequest(bunReq, this.shimCtx);
+    const req = buildNativeRouteRequest(bunReq, this.shimCtx, server);
     await maybeParseBody(req, bunReq, this.shimCtx);
     return new Promise<Response>(resolve => {
       const res = makeBunResponse(this, req, resolve);
@@ -559,7 +617,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
         if (err) return res._reject(err);
         if (res.finished) return;
         if (idx >= handlers.length) {
-          return this.dispatchNotFound(req, res, resolve);
+          return this.dispatchNotFound(req, res);
         }
         const h = handlers[idx++];
         try {
@@ -623,6 +681,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       rawUrl,
       queryStart,
       this.shimCtx,
+      bunServer,
     );
 
     return new Promise<Response>(resolve => {
@@ -648,7 +707,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
           serveStatic(matched, res)
             .then(handled => {
               if (!handled && !res.finished) {
-                this.dispatchRoutes(req, res, pathname, resolve);
+                this.dispatchRoutes(req, res, pathname);
               }
             })
             .catch(err => res._reject(err));
@@ -656,25 +715,20 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
         }
       }
 
-      this.dispatchRoutes(req, res, pathname, resolve);
+      this.dispatchRoutes(req, res, pathname);
     });
   }
 
   /** Route + middleware dispatch shared by the plain path and the static-miss path. */
-  private dispatchRoutes(
-    req: BunRequest,
-    res: BunResponse,
-    pathname: string,
-    resolve: (response: Response) => void,
-  ) {
+  private dispatchRoutes(req: BunRequest, res: BunResponse, pathname: string) {
     // Fast path — no global middleware: skip the Promise/await chain.
     if (this.router.middleware.length === 0) {
       const matches = this.router.matchAll(req.method, pathname);
       if (matches.length === 0) {
-        return this.dispatchNotFound(req, res, resolve);
+        return this.dispatchNotFound(req, res);
       }
       this.runRouteChain(matches, req, res, () => {
-        if (!res.finished) this.dispatchNotFound(req, res, resolve);
+        if (!res.finished) this.dispatchNotFound(req, res);
       });
       return;
     }
@@ -689,10 +743,10 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
         if (res.finished) return;
         const matches = this.router.matchAll(req.method, pathname);
         if (matches.length === 0) {
-          return this.dispatchNotFound(req, res, resolve);
+          return this.dispatchNotFound(req, res);
         }
         this.runRouteChain(matches, req, res, () => {
-          if (!res.finished) this.dispatchNotFound(req, res, resolve);
+          if (!res.finished) this.dispatchNotFound(req, res);
         });
       })
       .catch(err => {
@@ -710,7 +764,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
 
   private async runGlobalMiddleware(req: BunRequest, res: BunResponse) {
     for (const mw of this.router.middleware) {
-      if (mw.prefix !== '/' && !req.path.startsWith(mw.prefix)) continue;
+      if (!matchesPathPrefix(req.path, mw.prefix)) continue;
       if (res.finished) return;
       await new Promise<void>((resolveStep, rejectStep) => {
         try {
@@ -762,26 +816,32 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     step();
   }
 
-  private dispatchNotFound(
-    req: BunRequest,
-    res: BunResponse,
-    resolve: (response: Response) => void,
-  ) {
+  private dispatchNotFound(req: BunRequest, res: BunResponse) {
     if (this.notFoundHandler) {
+      // The handler gets a real `next` that falls back to the built-in 404.
+      // It used to receive a no-op, so a handler that delegated instead of
+      // writing left the response promise pending and hung the connection.
+      const next = (err?: unknown) => {
+        if (err) return res._reject(err);
+        if (!res.finished) this.renderDefaultNotFound(res);
+      };
       try {
-        Promise.resolve(this.notFoundHandler(req, res, () => {})).catch(err =>
-          res._reject(err),
-        );
-        return;
+        const ret = this.notFoundHandler(req, res, next);
+        if (isThenable(ret)) ret.catch(err => res._reject(err));
       } catch (err) {
-        return res._reject(err);
+        res._reject(err);
       }
+      return;
     }
+    this.renderDefaultNotFound(res);
+  }
+
+  private renderDefaultNotFound(res: BunResponse) {
     res.statusCode = 404;
     res.headers['content-type'] = 'application/json; charset=utf-8';
     res.finished = true;
     res.headersSent = true;
-    resolve(
+    res._resolve(
       new Response(
         '{"statusCode":404,"message":"Not Found"}',
         toResponseInit(res.headers, 404),

@@ -54,6 +54,16 @@ export interface BunResponse {
   body: any;
   headersSent: boolean;
   finished: boolean;
+  /**
+   * True once `write()`/`writeHead()`/`flushHeaders()` upgraded the response to
+   * a streaming `ReadableStream`. Past that point the headers are already on
+   * the wire, so `reply()`/`end()` must append to the stream rather than try to
+   * settle a second buffered `Response`.
+   *
+   * Optional so that externally-constructed `BunResponse` objects (test doubles,
+   * alternate response factories) keep compiling — absent is read as `false`.
+   */
+  readonly _streaming?: boolean;
   _resolve: (response: Response) => void;
   _reject: (err: unknown) => void;
   req: BunRequest;

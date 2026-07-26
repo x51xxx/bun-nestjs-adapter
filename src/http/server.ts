@@ -31,6 +31,7 @@ export interface BunTlsOptions {
  */
 export type BunNativeRouteHandler = (
   req: Request,
+  server: BunServer,
 ) => Response | undefined | Promise<Response | undefined>;
 
 /** `path → handler` or `path → { METHOD: handler }` map for `Bun.serve({ routes })`. */
