@@ -17,46 +17,34 @@ all resolve through **the same** copy. That cleared the entire class of
 The remaining skips are narrower issues that the paths-redirect doesn't
 address.
 
-## Lazy-loaded routes after `app.listen()`
+## Retracted — `lazy-modules` and `scopes` were never adapter or runtime bugs
 
-**Affects:** `lazy-modules`.
+Both were re-tested on 2026-07-26 against Bun 1.3.5, 1.3.14 and 1.4.0-canary.
+They pass on all three. The skips were caused by faulty test setup on our side,
+not by Bun or the adapter — the previous entries here described causes that were
+never verified.
 
-**Symptom:** `GET /lazy/transient` and `/lazy/request` return 404.
+**`lazy-modules`** was documented as "routes frozen at `listen()`". It wasn't:
+our block booted `AppModule`, which imports `GlobalModule` + `EagerModule` and
+lazily loads a *provider-only* module. It never references `LazyController`, so
+`/lazy/*` was never registered with any adapter and the 404 was correct. Upstream's
+own `e2e/lazy-import-*-providers.spec.ts` bootstraps `controllers:
+[LazyController]` directly; the lazy loading happens *inside* the handler, which
+is an ordinary route as far as the adapter is concerned. Instrumenting
+`registerRoute` confirmed zero route registrations, before or after `listen()`.
 
-**Cause:** Our `Bun.serve({ routes })` fast path freezes the route map at
-`app.listen()`. `LazyModuleLoader.load()` mutates Nest's route table at
-runtime — those new routes never reach the Bun server.
+**`scopes`** was documented as "Bun drops `design:paramtypes` for request-scoped
+providers". It doesn't: the assertion read `HelloService.COUNTER`, and that class
+has no `COUNTER` and never increments one — it could only ever be 0. Upstream's
+`e2e/request-scope.spec.ts` asserts on `UsersService` instead. With the correct
+assertions, controller, service, pipe, interceptor and guard all resolve 3/3 per
+request with `REQUEST_SCOPED_DATA === [1, 1, 1]`.
 
-**Unblocks when** the adapter calls `server.reload({ routes: rebuild() })`
-after each lazy load, or detects `LazyModuleLoader` in the module graph
-at boot and falls back to the manual `fetch` dispatcher (which already
-handles dynamic dispatch).
+Both blocks now run unskipped in `upstream-fixtures.spec.ts`.
 
-**Update:** the adapter now rebuilds and calls `server.reload({ routes })`
-whenever a route / middleware is registered after `listen()` (see
-`reloadRoutes()` in `bun-http-adapter.ts`). Whether `LazyModuleLoader.load()`
-routes through that registration path for this fixture is untested — re-run
-`bun run test:fixtures` with the skip removed to check before assuming it's
-still broken.
-
-## Request-scoped service metadata
-
-**Affects:** `scopes`.
-
-**Symptom:** the request-scoped controller resolves and returns 200, but
-`HelloService.COUNTER` stays at 0 — the request-scoped service is never
-instantiated.
-
-**Cause (suspected):** Bun's per-file transpile of
-`@Injectable({ scope: Scope.REQUEST })` drops the `design:paramtypes`
-metadata Nest needs to provision a per-request service instance, even
-with `emitDecoratorMetadata: true`. Cross-file type references (the
-service is imported from a sibling module) make the elision more
-aggressive.
-
-**Unblocks when** Bun preserves emitted decorator metadata for cross-file
-type imports, or we pre-compile the fixture sources with `tsc` instead of
-letting Bun transpile them on demand.
+**Lesson for the remaining entries below:** a skipped fixture whose cause was
+inferred rather than measured is not a known limitation, it is an unknown. Verify
+before documenting.
 
 ## Bun TDZ on circular imports
 
@@ -74,6 +62,26 @@ Bun runtime behaviour, no relation to our adapter.
 
 **Unblocks when** Bun ships a fix or the upstream fixtures change their
 circular layout.
+
+**Re-verified 2026-07-26** on Bun 1.3.5, 1.3.14 and 1.4.0-canary — all three
+still throw. This is the only fixture skip with a measured cause.
+
+## Fixture blocks silently inactive after an upstream layout change
+
+**Affects:** `global-prefix`, `auto-mock`, `module-utils`.
+
+**Symptom:** none — and that is the problem. `skipIfMissing()` turns a fixture
+path that no longer exists into a green `describe.skip`, so a fixture that moved
+upstream looks identical to one that passes.
+
+**Cause:** the `fixtures/nestjs-nest` submodule has drifted from the paths the
+spec hard-codes. `global-prefix` no longer ships a `src/` at all; `auto-mock` has
+`src/*.service.ts` but no `app.module.ts`; `module-utils` renamed its entry point
+to `src/integration.module.ts`.
+
+**Unblocks when** the spec points at the current entry points, and
+`skipIfMissing` distinguishes "submodule not installed" (legitimate skip) from
+"installed but this path is gone" (should fail loudly).
 
 ## WebSocket namespaces
 

@@ -253,55 +253,92 @@ globalPrefix.describe('upstream :: nest-application/global-prefix', () => {
 
 // ───── scopes (request-scoped controllers + guards/interceptors) ──────────
 const scopes = skipIfMissing(join(FIXTURES_ROOT, 'scopes', 'src', 'app.module.ts'));
-// SKIPPED — controller resolves & returns 200, but the request-scoped
-// HelloService's static COUNTER stays at 0. Most likely Bun's per-file
-// transpile of @Injectable({ scope: Scope.REQUEST }) drops the metadata
-// Nest needs to provision a per-request instance. Tracking separately;
-// the adapter itself is not at fault.
-scopes.describe.skip('upstream :: scopes (KNOWN: request-scope metadata)', () => {
+// Previously skipped as "Bun drops request-scope metadata" — that diagnosis was
+// wrong. The old assertion read `HelloService.COUNTER`, but that class has no
+// COUNTER and never increments one, so it could only ever be 0. Upstream's own
+// `e2e/request-scope.spec.ts` asserts on `UsersService` instead; with the same
+// assertions the fixture passes here (verified on Bun 1.3.5, 1.3.14 and
+// 1.4.0-canary).
+const SCOPES_SRC = join(FIXTURES_ROOT, 'scopes', 'src', 'hello');
+scopes.describe('upstream :: scopes (request-scoped DI)', () => {
   let ctx: { app: any; baseUrl: string };
   let HelloController: any;
-  let HelloService: any;
+  let UsersService: any;
+  let UserByIdPipe: any;
+  let Interceptor: any;
+  let Guard: any;
   beforeAll(async () => {
     const mod = await import(join(FIXTURES_ROOT, 'scopes', 'src', 'app.module.ts'));
-    HelloController = (
-      await import(join(FIXTURES_ROOT, 'scopes', 'src', 'hello', 'hello.controller.ts'))
-    ).HelloController;
-    HelloService = (
-      await import(join(FIXTURES_ROOT, 'scopes', 'src', 'hello', 'hello.service.ts'))
-    ).HelloService;
-    HelloController.COUNTER = 0;
-    HelloService.COUNTER = 0;
+    HelloController = (await import(join(SCOPES_SRC, 'hello.controller.ts')))
+      .HelloController;
+    UsersService = (await import(join(SCOPES_SRC, 'users', 'users.service.ts')))
+      .UsersService;
+    UserByIdPipe = (await import(join(SCOPES_SRC, 'users', 'user-by-id.pipe.ts')))
+      .UserByIdPipe;
+    Interceptor = (
+      await import(join(SCOPES_SRC, 'interceptors', 'logging.interceptor.ts'))
+    ).Interceptor;
+    Guard = (await import(join(SCOPES_SRC, 'guards', 'request-scoped.guard.ts'))).Guard;
+    for (const cls of [HelloController, UsersService, UserByIdPipe, Interceptor, Guard]) {
+      cls.COUNTER = 0;
+    }
     ctx = await bootApp(mod.ApplicationModule);
+    for (let i = 0; i < 3; i++) await fetch(`${ctx.baseUrl}/hello`);
   });
   afterAll(async () => ctx.app.close());
 
-  it('creates a fresh request-scoped controller per request', async () => {
-    await fetch(`${ctx.baseUrl}/hello`);
-    await fetch(`${ctx.baseUrl}/hello`);
-    await fetch(`${ctx.baseUrl}/hello`);
+  it('creates a fresh controller per request', () => {
     expect(HelloController.COUNTER).toBe(3);
-    expect(HelloService.COUNTER).toBe(3);
+  });
+
+  it('creates a fresh request-scoped service per request', () => {
+    expect(UsersService.COUNTER).toBe(3);
+  });
+
+  it('creates a request-scoped pipe per request', () => {
+    expect(UserByIdPipe.COUNTER).toBe(3);
+    expect(UserByIdPipe.REQUEST_SCOPED_DATA).toEqual([1, 1, 1]);
+  });
+
+  it('creates a request-scoped interceptor per request', () => {
+    expect(Interceptor.COUNTER).toBe(3);
+    expect(Interceptor.REQUEST_SCOPED_DATA).toEqual([1, 1, 1]);
+  });
+
+  it('creates a request-scoped guard per request', () => {
+    expect(Guard.COUNTER).toBe(3);
+    expect(Guard.REQUEST_SCOPED_DATA).toEqual([1, 1, 1]);
   });
 });
 
 // ───── lazy-modules ─────────────────────────────────────────────────────────
 const lazyModules = skipIfMissing(
-  join(FIXTURES_ROOT, 'lazy-modules', 'src', 'app.module.ts'),
+  join(FIXTURES_ROOT, 'lazy-modules', 'src', 'lazy.controller.ts'),
 );
-// SKIPPED — `LazyModuleLoader.load()` mutates the route table at runtime,
-// but our `Bun.serve({ routes })` fast path freezes the route map at
-// `app.listen()`. Lazy routes resolve to 404. Unblocks once we wire
-// `server.reload({ routes: rebuild() })` after each lazy load (or fall
-// back to the manual fetch dispatcher whenever LazyModuleLoader is in
-// the module graph). Always skipped → plain `describe.skip`.
-describe.skip('upstream :: lazy-modules (KNOWN: routes frozen at listen)', () => {
+// Previously skipped as "routes frozen at listen" — that diagnosis was wrong
+// too. The block booted `AppModule`, which imports GlobalModule + EagerModule
+// and lazily loads a *provider-only* module; it never references
+// `LazyController`, so `/lazy/*` was never registered with any adapter. The
+// 404 had nothing to do with the native-routes map. Upstream's
+// `e2e/lazy-import-*-providers.spec.ts` bootstraps `controllers:
+// [LazyController]` directly — the lazy loading happens inside the handler,
+// which is an ordinary route as far as the adapter is concerned.
+lazyModules.describe('upstream :: lazy-modules (lazy loading inside a handler)', () => {
   let ctx: { app: any; baseUrl: string };
   beforeAll(async () => {
-    const { AppModule } = await import(
-      join(FIXTURES_ROOT, 'lazy-modules', 'src', 'app.module.ts')
+    const { LazyController } = await import(
+      join(FIXTURES_ROOT, 'lazy-modules', 'src', 'lazy.controller.ts')
     );
-    ctx = await bootApp(AppModule);
+    const moduleRef = await Test.createTestingModule({
+      controllers: [LazyController],
+    }).compile();
+    const app = moduleRef.createNestApplication(new BunHttpAdapter(), { logger: false });
+    await app.init();
+    await app.listen(0, '127.0.0.1');
+    ctx = {
+      app,
+      baseUrl: `http://127.0.0.1:${(app.getHttpServer() as any).address().port}`,
+    };
   });
   afterAll(async () => ctx.app.close());
 
@@ -372,7 +409,9 @@ autoMock.describe('upstream :: auto-mock', () => {
 // SKIPPED — upstream/inspector ships circular-module fixtures whose .ts files
 // reference each other before declaration; Bun's per-file transpiler trips
 // on the temporal dead zone where Node-via-tsc would not. This is a Bun bug,
-// not an adapter issue.
+// not an adapter issue. Re-verified 2026-07-26 on Bun 1.3.5, 1.3.14 and
+// 1.4.0-canary — all three still throw
+// `ReferenceError: Cannot access 'CircularService' before initialization`.
 describe.skip('upstream :: inspector (KNOWN: Bun TDZ on circular imports)', () => {
   it('boots without throwing', async () => {
     const { AppModule } = await import(

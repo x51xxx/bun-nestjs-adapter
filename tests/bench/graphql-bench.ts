@@ -609,7 +609,11 @@ function spawnTarget(
   port: number,
   verbose: boolean,
 ): SpawnedTarget {
-  const child = spawn('bun', ['run', join(FRAMEWORK_DIR, `${framework}.ts`)], {
+  // `process.execPath`, not a bare 'bun': the target servers must run on the
+  // same runtime as this harness. Resolving 'bun' from PATH silently benchmarked
+  // whatever bun happened to be installed, which makes any runtime A/B
+  // (e.g. 1.3.x vs 1.4 canary) measure nothing.
+  const child = spawn(process.execPath, ['run', join(FRAMEWORK_DIR, `${framework}.ts`)], {
     stdio: verbose ? 'inherit' : ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, PORT: String(port) },
   });
