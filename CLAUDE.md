@@ -38,6 +38,7 @@ Benchmarks: `bun run bench` (single-adapter HTTP). `bun run bench:matrix` / `bun
 - **Fast path** — when no `use()` middleware, static assets, or CORS are registered, the adapter hands routing to Bun's native C++ matcher via `Bun.serve({ routes })` (`buildBunRoutes()`). Route handlers run with minimal allocation (`runBunRouteSingle` / `runBunRouteChain`).
 - **Slow path** — any middleware/static/CORS forces the manual `fetch` dispatcher (`handle()`), which does its own regex route matching and `next()`-style chaining.
 - Consequence: the fast path **freezes the route map at boot**, so routes added after `app.listen()` (lazy modules) are invisible. See `KNOWN-LIMITATIONS.md`.
+- Individual paths also opt out of the native map when Bun's matcher would mangle their params (`*splat`, `:id?`, `:id(\d+)`, `:a-:b`) — see `bunRoutesLoseParams()` and the dispatcher-selection table in `AGENTS.md`. Bun falls through to `fetch`, so both paths yield identical `req.params`.
 
 **Request/response are shims, not real Node objects.** `bunReqToShim()` turns a Web `Request` into an Express-flavoured `req` (`.params`, `.query`, `.headers`, EventEmitter for `'close'`). `makeBunResponse()` builds a `res` that **buffers** and only settles a `Promise<Response>` via `res._resolve(new Response(...))` — there is no socket write. `attachWritableShim()` lazily upgrades a response to a streaming `ReadableStream` the first time `write`/`writeHead` is called (SSE, `StreamableFile`, Node `Readable`). When editing `reply()`/`end()`, preserve the "buffered until streamed" contract.
 

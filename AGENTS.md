@@ -286,9 +286,40 @@ Runs on push to `main`. Uses `changesets/action` with `NPM_TOKEN` and `NPM_CONFI
 
 ---
 
+## Dispatcher selection (which requests skip Bun's native matcher)
+
+`BunHttpAdapter.listen()` builds a `Bun.serve({ routes })` map only when no
+middleware, static-asset mount or `enableCors()` is registered. On top of that
+whole-app switch, individual **paths** are left out of the native map when Bun's
+matcher can't destructure them faithfully — `bunRoutesLoseParams()` in
+`http/router.ts`. Bun then falls through to the `fetch` callback, which routes
+them through `compilePath`'s regex, so both dispatchers produce identical params.
+
+Verified against Bun 1.3.5, these forms are excluded:
+
+| Path form | What Bun's matcher does |
+|---|---|
+| `*name`, `{*name}` | matches, but `params` comes back empty — capture lost |
+| `:id?` | not optional; param lands under the key `id?` |
+| `:id(\d+)` | pattern not enforced (`/p/abc` matches); key is `id(\d+)` |
+| `:a-:b` | collapses to a single key `b` holding the whole segment |
+
+Plain `:param` and bare `*` stay native. When touching `compilePath`, re-check
+this predicate: a form our regex supports but Bun mis-parses must be listed here
+or the two paths silently disagree.
+
+`HEAD` is served from the `GET` handler on both dispatchers when no explicit
+`@Head()` route exists. Bun strips the body itself; `makeBunResponse` additionally
+refuses to open a `ReadableStream` for a HEAD request and emits `'close'` on the
+request instead, so a `@Sse()` route reached over HEAD tears its subscription down
+rather than producing into a buffer nobody drains.
+
+---
+
 ## Security considerations
 
 - **No bundled NestJS**: `@nestjs/*` are peer dependencies and externals. Vulnerabilities in Nest core are the consumer's responsibility to patch.
+- **`req.ip` and proxies**: `req.ip` comes from Bun's `server.requestIP()`. `X-Forwarded-For` is **ignored by default** — it is client-supplied, so honouring it unconditionally lets any caller forge the key rate limiters and audit logs are built on. Apps behind a trusted proxy opt in with `BunHttpAdapter#setTrustProxy()` (the equivalent of Express' `app.set('trust proxy', true)`).
 - **Supply-chain monitoring**: CI runs Socket.dev and Snyk scans on every PR.
 - **npm provenance**: Releases publish with npm provenance enabled.
 - **Audit baseline**: `bun audit --audit-level=high` runs in CI but does not block merges (warn-only).
@@ -299,9 +330,10 @@ Runs on push to `main`. Uses `changesets/action` with `NPM_TOKEN` and `NPM_CONFI
 
 See `KNOWN-LIMITATIONS.md` for the authoritative list. Summaries:
 
-1. **Lazy-loaded routes after `app.listen()`** (`lazy-modules` fixture skipped) — `Bun.serve({ routes })` fast path freezes the route map at boot; `LazyModuleLoader.load()` mutations are invisible.
-2. **Request-scoped service metadata** (`scopes` fixture skipped) — Bun's per-file transpiler may drop `design:paramtypes` for cross-file `@Injectable({ scope: Scope.REQUEST })`.
-3. **Bun TDZ on circular imports** (`inspector` / `circular-modules` fixture skipped) — Pure Bun runtime behaviour, unrelated to this adapter.
+1. **Bun TDZ on circular imports** (`inspector` / `circular-modules` fixture skipped) — Pure Bun runtime behaviour, unrelated to this adapter. Re-verified 2026-07-26 on Bun 1.3.5, 1.3.14 and 1.4.0-canary: still broken on all three.
+2. **Silently inactive fixture blocks** (`global-prefix`, `auto-mock`, `module-utils`) — the submodule moved these fixtures' entry points, and `skipIfMissing()` renders a stale path as a green skip rather than a failure.
+
+Retracted: `lazy-modules` and `scopes` were listed here as adapter/runtime bugs. Both were faulty test setup on our side and now run unskipped — see `KNOWN-LIMITATIONS.md`. Treat any skip whose cause was inferred rather than measured as unknown until re-tested.
 
 When fixing any of these, drop `.skip` from the relevant `describe.skip` in `upstream-fixtures.spec.ts`, run `bun run test:fixtures`, and commit only when zero failures.
 
