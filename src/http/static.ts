@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import { extname, join, normalize, sep } from 'path';
 import { toResponseInit } from './response';
+import { matchesPathPrefix } from './router';
 import { BunResponse } from './types';
 
 export interface StaticEntry {
@@ -35,14 +36,9 @@ export function matchStatic(
 ): StaticMatch | null {
   for (const entry of staticAssets) {
     const prefix = entry.prefix === '/' ? '' : entry.prefix;
-    if (prefix) {
-      // Boundary-aware prefix match: `/static` must match `/static`,
-      // `/static/`, `/static/foo`, but NOT `/static-admin/foo`.
-      if (!pathname.startsWith(prefix)) continue;
-      const next = pathname.charCodeAt(prefix.length);
-      // 0x2F = '/'.  NaN means we're at the end of the string (exact match).
-      if (!Number.isNaN(next) && next !== 0x2f) continue;
-    }
+    // `/static` must match `/static`, `/static/`, `/static/foo`, but NOT
+    // `/static-admin/foo`.
+    if (prefix && !matchesPathPrefix(pathname, prefix)) continue;
     let rel = pathname.slice(prefix.length) || '/';
     if (rel.endsWith('/')) rel += entry.index;
     return { entry, relPath: rel };
