@@ -469,7 +469,7 @@ function buildMd(runs: RunsMatrix, matrixArgs: MatrixArgs): string {
   lines.push('## Findings');
   lines.push('');
   lines.push(
-    'Narrative analysis that outlives a regeneration — why GraphQL on `bun` trails `express`, and the Bun 1.4.0-canary comparison — lives in [`BENCHMARK-FINDINGS.md`](./BENCHMARK-FINDINGS.md).',
+    'Narrative analysis that outlives a regeneration — why GraphQL on `bun` trails `express`, and how the Bun 1.4.0 upgrade moved the standings — lives in [`BENCHMARK-FINDINGS.md`](./BENCHMARK-FINDINGS.md).',
   );
   lines.push('');
   lines.push('## Notes');

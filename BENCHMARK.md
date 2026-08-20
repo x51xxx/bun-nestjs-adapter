@@ -1,12 +1,12 @@
 # NestJS Bun Adapter — GraphQL vs REST Benchmark
 
-Generated 2026-06-09 20:40:24 UTC.
+Generated 2026-08-20 17:27:18 UTC.
 
 ## Environment
 
-- **Host**: Mac.asus.com (darwin 25.3.0)  
+- **Host**: MacBook-Pro-Taras.local (darwin 25.3.0)  
 - **Total RAM**: 48.0 GB  
-- **Bun**: 1.3.5  
+- **Bun**: 1.4.0  
 - **Runs per (size × protocol)**: 5  
 - **Protocols**: graphql, rest  
 - **Load generator**: both REST and GraphQL driven by external **k6** (Go, multi-threaded) — the same instrument for every target.
@@ -43,17 +43,17 @@ Each cell below is **mean ± stddev** across the runs. RPS rows show a `(min..ma
 
 | target | total RPS | p50 (ms) | p99 (ms) | RSS avg (MB) | RSS p95 (MB) | RSS max (MB) | errors |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| graphql-nest-express | 2581 ± 186 _(2283..2794)_ | 6.4 ± 0.2 | 30.1 ± 12.4 | 290.6 ± 13.8 | 307.3 | 307.3 | 0 |
-| graphql-nest-fastify | 2684 ± 71 _(2550..2746)_ | 6.1 ± 0.2 | 21.0 ± 0.6 | 294.6 ± 3.0 | 316.9 | 316.9 | 0 |
-| **graphql-nest-bun** | 2837 ± 132 _(2589..2971)_ | 6.7 ± 0.2 | 21.7 ± 2.0 | 273.3 ± 11.8 | 290.2 | 290.4 | 0 |
+| graphql-nest-express | 3391 ± 26 _(3356..3429)_ | 5.8 ± 0.1 | 17.1 ± 0.2 | 253.4 ± 6.1 | 265.6 | 265.6 | 0 |
+| graphql-nest-fastify | 3382 ± 33 _(3345..3444)_ | 5.8 ± 0.1 | 17.8 ± 0.3 | 251.0 ± 7.5 | 267.0 | 267.0 | 0 |
+| **graphql-nest-bun** | 3336 ± 150 _(3044..3473)_ | 5.8 ± 0.2 | 18.6 ± 1.7 | 234.8 ± 5.6 | 249.8 | 249.8 | 0 |
 
 ### REST (5 runs)
 
 | target | total RPS | p50 (ms) | p99 (ms) | RSS avg (MB) | RSS p95 (MB) | RSS max (MB) | errors |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| rest-nest-express | 11567 ± 582 _(10545..12145)_ | 1.3 ± 0.0 | 5.5 ± 0.4 | 218.1 ± 22.6 | 238.9 | 239.0 | 0 |
-| rest-nest-fastify | 12715 ± 123 _(12533..12869)_ | 1.2 ± 0.0 | 4.9 ± 0.0 | 228.8 ± 11.7 | 251.5 | 252.2 | 0 |
-| **rest-nest-bun** | 13371 ± 533 _(12354..13839)_ | 1.4 ± 0.0 | 4.0 ± 0.7 | 208.4 ± 25.3 | 226.2 | 226.2 | 0 |
+| rest-nest-express | 13942 ± 431 _(13175..14365)_ | 1.3 ± 0.0 | 3.9 ± 0.4 | 225.1 ± 11.8 | 236.2 | 236.2 | 0 |
+| rest-nest-fastify | 14976 ± 640 _(13948..15700)_ | 1.2 ± 0.0 | 3.5 ± 0.5 | 203.1 ± 13.7 | 217.6 | 217.6 | 0 |
+| **rest-nest-bun** | 16228 ± 527 _(15199..16631)_ | 1.2 ± 0.0 | 3.2 ± 0.3 | 175.4 ± 4.8 | 188.1 | 188.1 | 0 |
 
 ### small — GraphQL tax (same adapter, REST as baseline)
 
@@ -61,9 +61,9 @@ Each cell below is **mean ± stddev** across the runs. RPS rows show a `(min..ma
 
 | adapter | REST RPS | GraphQL RPS | Δ RPS | REST p99 | GraphQL p99 | Δ p99 | REST RSS | GraphQL RSS | Δ RSS |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| express | 11567 | 2581 | -77.7% | 5.5 | 30.1 | +444.6% | 218.1 | 290.6 | +72.4 |
-| fastify | 12715 | 2684 | -78.9% | 4.9 | 21.0 | +332.2% | 228.8 | 294.6 | +65.8 |
-| **bun** | 13371 | 2837 | -78.8% | 4.0 | 21.7 | +443.6% | 208.4 | 273.3 | +64.9 |
+| express | 13942 | 3391 | -75.7% | 3.9 | 17.1 | +342.2% | 225.1 | 253.4 | +28.3 |
+| fastify | 14976 | 3382 | -77.4% | 3.5 | 17.8 | +405.5% | 203.1 | 251.0 | +47.9 |
+| **bun** | 16228 | 3336 | -79.4% | 3.2 | 18.6 | +478.0% | 175.4 | 234.8 | +59.4 |
 
 ## Medium load (50 conn × 10s)
 
@@ -71,17 +71,17 @@ Each cell below is **mean ± stddev** across the runs. RPS rows show a `(min..ma
 
 | target | total RPS | p50 (ms) | p99 (ms) | RSS avg (MB) | RSS p95 (MB) | RSS max (MB) | errors |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| graphql-nest-express | 2693 ± 62 _(2622..2810)_ | 18.4 ± 0.4 | 38.4 ± 1.0 | 317.5 ± 6.8 | 330.9 | 330.9 | 0 |
-| graphql-nest-fastify | 2503 ± 32 _(2444..2535)_ | 19.5 ± 0.2 | 48.9 ± 13.5 | 317.5 ± 16.0 | 352.9 | 354.8 | 0 |
-| **graphql-nest-bun** | 2702 ± 154 _(2429..2891)_ | 18.0 ± 0.6 | 44.2 ± 14.6 | 275.0 ± 22.4 | 299.6 | 301.0 | 0 |
+| graphql-nest-express | 3291 ± 140 _(3019..3386)_ | 14.9 ± 0.4 | 31.3 ± 4.0 | 250.1 ± 8.9 | 262.2 | 262.9 | 0 |
+| graphql-nest-fastify | 3322 ± 45 _(3289..3409)_ | 14.9 ± 0.2 | 29.7 ± 0.5 | 278.0 ± 8.4 | 308.8 | 312.1 | 0 |
+| **graphql-nest-bun** | 3350 ± 42 _(3291..3397)_ | 14.7 ± 0.1 | 29.5 ± 0.5 | 258.7 ± 1.6 | 279.5 | 279.6 | 0 |
 
 ### REST (5 runs)
 
 | target | total RPS | p50 (ms) | p99 (ms) | RSS avg (MB) | RSS p95 (MB) | RSS max (MB) | errors |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| rest-nest-express | 11030 ± 210 _(10647..11264)_ | 4.6 ± 0.0 | 11.2 ± 1.5 | 238.7 ± 21.6 | 259.9 | 260.1 | 0 |
-| rest-nest-fastify | 11727 ± 248 _(11319..11958)_ | 4.3 ± 0.0 | 10.2 ± 0.6 | 246.2 ± 18.7 | 279.1 | 280.8 | 0 |
-| **rest-nest-bun** | 12954 ± 242 _(12475..13135)_ | 3.7 ± 0.0 | 7.6 ± 0.5 | 220.4 ± 12.1 | 247.2 | 247.9 | 0 |
+| rest-nest-express | 13808 ± 206 _(13415..13984)_ | 3.5 ± 0.0 | 7.4 ± 0.3 | 244.4 ± 13.5 | 267.2 | 267.7 | 0 |
+| rest-nest-fastify | 14915 ± 103 _(14745..15061)_ | 3.2 ± 0.0 | 6.6 ± 0.1 | 240.1 ± 9.6 | 278.9 | 280.9 | 0 |
+| **rest-nest-bun** | 15861 ± 304 _(15290..16181)_ | 3.0 ± 0.0 | 6.5 ± 0.5 | 197.8 ± 10.6 | 227.6 | 227.6 | 0 |
 
 ### medium — GraphQL tax (same adapter, REST as baseline)
 
@@ -89,9 +89,9 @@ Each cell below is **mean ± stddev** across the runs. RPS rows show a `(min..ma
 
 | adapter | REST RPS | GraphQL RPS | Δ RPS | REST p99 | GraphQL p99 | Δ p99 | REST RSS | GraphQL RSS | Δ RSS |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| express | 11030 | 2693 | -75.6% | 11.2 | 38.4 | +241.8% | 238.7 | 317.5 | +78.8 |
-| fastify | 11727 | 2503 | -78.7% | 10.2 | 48.9 | +381.4% | 246.2 | 317.5 | +71.2 |
-| **bun** | 12954 | 2702 | -79.1% | 7.6 | 44.2 | +481.0% | 220.4 | 275.0 | +54.6 |
+| express | 13808 | 3291 | -76.2% | 7.4 | 31.3 | +320.7% | 244.4 | 250.1 | +5.7 |
+| fastify | 14915 | 3322 | -77.7% | 6.6 | 29.7 | +350.1% | 240.1 | 278.0 | +37.9 |
+| **bun** | 15861 | 3350 | -78.9% | 6.5 | 29.5 | +356.2% | 197.8 | 258.7 | +60.9 |
 
 ## Large load (100 conn × 15s)
 
@@ -99,17 +99,17 @@ Each cell below is **mean ± stddev** across the runs. RPS rows show a `(min..ma
 
 | target | total RPS | p50 (ms) | p99 (ms) | RSS avg (MB) | RSS p95 (MB) | RSS max (MB) | errors |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| graphql-nest-express | 2724 ± 60 _(2632..2818)_ | 36.7 ± 0.9 | 75.3 ± 1.9 | 311.4 ± 15.0 | 334.4 | 334.4 | 0 |
-| graphql-nest-fastify | 2626 ± 153 _(2471..2879)_ | 37.6 ± 1.6 | 100.9 ± 25.5 | 320.7 ± 26.7 | 349.0 | 352.7 | 0 |
-| **graphql-nest-bun** | 2847 ± 75 _(2731..2952)_ | 34.4 ± 0.9 | 56.1 ± 12.1 | 275.9 ± 23.4 | 295.5 | 296.0 | 0 |
+| graphql-nest-express | 3374 ± 47 _(3312..3433)_ | 29.1 ± 0.3 | 44.4 ± 7.6 | 262.6 ± 15.7 | 276.8 | 278.6 | 0 |
+| graphql-nest-fastify | 3317 ± 34 _(3274..3376)_ | 29.6 ± 0.2 | 54.7 ± 2.5 | 311.2 ± 2.3 | 339.7 | 339.9 | 0 |
+| **graphql-nest-bun** | 3402 ± 33 _(3344..3428)_ | 28.9 ± 0.3 | 53.8 ± 0.8 | 269.6 ± 4.3 | 281.7 | 281.9 | 0 |
 
 ### REST (5 runs)
 
 | target | total RPS | p50 (ms) | p99 (ms) | RSS avg (MB) | RSS p95 (MB) | RSS max (MB) | errors |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| rest-nest-express | 10141 ± 106 _(10030..10298)_ | 10.0 ± 0.1 | 23.5 ± 2.9 | 257.1 ± 16.2 | 288.4 | 291.1 | 0 |
-| rest-nest-fastify | 11176 ± 178 _(11001..11519)_ | 9.4 ± 0.1 | 18.2 ± 0.4 | 287.1 ± 14.2 | 312.2 | 313.7 | 0 |
-| **rest-nest-bun** | 13212 ± 221 _(12775..13375)_ | 7.2 ± 0.0 | 13.7 ± 1.7 | 236.9 ± 21.3 | 264.4 | 270.5 | 0 |
+| rest-nest-express | 14021 ± 111 _(13853..14143)_ | 6.8 ± 0.0 | 12.9 ± 0.3 | 255.9 ± 9.7 | 284.4 | 288.2 | 0 |
+| rest-nest-fastify | 15123 ± 115 _(14974..15279)_ | 6.3 ± 0.0 | 12.0 ± 0.1 | 271.9 ± 1.2 | 319.4 | 323.3 | 0 |
+| **rest-nest-bun** | 16210 ± 54 _(16127..16289)_ | 5.9 ± 0.0 | 11.2 ± 0.1 | 223.9 ± 3.4 | 271.4 | 272.5 | 0 |
 
 ### large — GraphQL tax (same adapter, REST as baseline)
 
@@ -117,25 +117,13 @@ Each cell below is **mean ± stddev** across the runs. RPS rows show a `(min..ma
 
 | adapter | REST RPS | GraphQL RPS | Δ RPS | REST p99 | GraphQL p99 | Δ p99 | REST RSS | GraphQL RSS | Δ RSS |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| express | 10141 | 2724 | -73.1% | 23.5 | 75.3 | +220.4% | 257.1 | 311.4 | +54.2 |
-| fastify | 11176 | 2626 | -76.5% | 18.2 | 100.9 | +455.0% | 287.1 | 320.7 | +33.7 |
-| **bun** | 13212 | 2847 | -78.5% | 13.7 | 56.1 | +308.7% | 236.9 | 275.9 | +39.1 |
-
-## GraphQL driver: Apollo vs Yoga (on bun)
-
-Same hand-written resolver / service / DTOs / CASL — only the GraphQL **driver** differs. `graphql-nest-bun` uses `@nestjs/apollo` (ApolloDriver); `graphql-nest-bun-yoga` uses GraphQL Yoga via the experimental `BunYogaDriver` (fetch-native — feeds the raw Web `Request` to Yoga, no Node `req`/`res` bridge). Both run on `BunHttpAdapter`. `Δ` is Yoga relative to Apollo.
-
-| size | Apollo RPS | Yoga RPS | Δ RPS | Apollo p99 | Yoga p99 | Δ p99 | Apollo RSS | Yoga RSS |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| small | 2837 | **4148** | +46.2% | 21.7 | 12.2 | -43.6% | 273.3 | 290.1 |
-| medium | 2702 | **3863** | +43.0% | 44.2 | 27.1 | -38.8% | 275.0 | 266.4 |
-| large | 2847 | **4107** | +44.3% | 56.1 | 30.2 | -46.2% | 275.9 | 301.3 |
-
-> `graphql-nest-bun-yoga` is experimental bench-only tooling (`tests/bench/frameworks/graphql/bun-yoga-driver.ts`), not part of the published adapter. Regenerate with `bun run tests/bench/run-matrix.ts --with-yoga`.
+| express | 14021 | 3374 | -75.9% | 12.9 | 44.4 | +244.5% | 255.9 | 262.6 | +6.7 |
+| fastify | 15123 | 3317 | -78.1% | 12.0 | 54.7 | +356.7% | 271.9 | 311.2 | +39.3 |
+| **bun** | 16210 | 3402 | -79.0% | 11.2 | 53.8 | +379.1% | 223.9 | 269.6 | +45.7 |
 
 ## Findings
 
-Narrative analysis that outlives a regeneration — why GraphQL on `bun` trails `express`, and the Bun 1.4.0-canary comparison — lives in [`BENCHMARK-FINDINGS.md`](./BENCHMARK-FINDINGS.md).
+Narrative analysis that outlives a regeneration — why GraphQL on `bun` trails `express`, and how the Bun 1.4.0 upgrade moved the standings — lives in [`BENCHMARK-FINDINGS.md`](./BENCHMARK-FINDINGS.md).
 
 ## Notes
 
