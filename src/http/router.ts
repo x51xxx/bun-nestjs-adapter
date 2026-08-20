@@ -176,7 +176,7 @@ const NAMED_WILDCARD = /^\*([A-Za-z0-9_$]+)$/;
  *   * `*name` — matches, yet hands back an empty `params` object, so the
  *     capture is silently lost;
  *   * any `:param` that isn't a bare identifier — Bun takes the rest of the
- *     segment as part of the *name*. Verified against Bun 1.3.5:
+ *     segment as part of the *name*. Verified against Bun 1.3.5 and 1.4.0:
  *     `/p/:id(\d+)` exposes the key `id(\d+)` and doesn't enforce the pattern
  *     (`/p/abc` matches); `/x/:a-:b` collapses to a single key `b` holding
  *     `a-b`; `/opt/:id?` isn't optional and lands under the key `id?`.

@@ -257,8 +257,8 @@ const scopes = skipIfMissing(join(FIXTURES_ROOT, 'scopes', 'src', 'app.module.ts
 // wrong. The old assertion read `HelloService.COUNTER`, but that class has no
 // COUNTER and never increments one, so it could only ever be 0. Upstream's own
 // `e2e/request-scope.spec.ts` asserts on `UsersService` instead; with the same
-// assertions the fixture passes here (verified on Bun 1.3.5, 1.3.14 and
-// 1.4.0-canary).
+// assertions the fixture passes here (verified on Bun 1.3.5, 1.3.14,
+// 1.4.0-canary and the released 1.4.0).
 const SCOPES_SRC = join(FIXTURES_ROOT, 'scopes', 'src', 'hello');
 scopes.describe('upstream :: scopes (request-scoped DI)', () => {
   let ctx: { app: any; baseUrl: string };
@@ -409,8 +409,8 @@ autoMock.describe('upstream :: auto-mock', () => {
 // SKIPPED — upstream/inspector ships circular-module fixtures whose .ts files
 // reference each other before declaration; Bun's per-file transpiler trips
 // on the temporal dead zone where Node-via-tsc would not. This is a Bun bug,
-// not an adapter issue. Re-verified 2026-07-26 on Bun 1.3.5, 1.3.14 and
-// 1.4.0-canary — all three still throw
+// not an adapter issue. Re-verified 2026-08-20 on the released Bun 1.4.0 (and
+// 2026-07-26 on 1.3.5, 1.3.14, 1.4.0-canary) — all still throw
 // `ReferenceError: Cannot access 'CircularService' before initialization`.
 describe.skip('upstream :: inspector (KNOWN: Bun TDZ on circular imports)', () => {
   it('boots without throwing', async () => {

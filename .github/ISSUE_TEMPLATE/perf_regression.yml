@@ -34,7 +34,7 @@ body:
     id: hardware
     attributes:
       label: Hardware / OS
-      placeholder: 'M1 Max, macOS 15.6, Bun 1.3.5'
+      placeholder: 'M1 Max, macOS 15.6, Bun 1.4.0'
     validations:
       required: true
 

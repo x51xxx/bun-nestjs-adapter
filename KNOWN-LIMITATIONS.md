@@ -19,10 +19,10 @@ address.
 
 ## Retracted — `lazy-modules` and `scopes` were never adapter or runtime bugs
 
-Both were re-tested on 2026-07-26 against Bun 1.3.5, 1.3.14 and 1.4.0-canary.
-They pass on all three. The skips were caused by faulty test setup on our side,
-not by Bun or the adapter — the previous entries here described causes that were
-never verified.
+Both were re-tested on 2026-07-26 against Bun 1.3.5, 1.3.14 and 1.4.0-canary, and
+again on 2026-08-20 against the released Bun 1.4.0. They pass on all four. The
+skips were caused by faulty test setup on our side, not by Bun or the adapter —
+the previous entries here described causes that were never verified.
 
 **`lazy-modules`** was documented as "routes frozen at `listen()`". It wasn't:
 our block booted `AppModule`, which imports `GlobalModule` + `EagerModule` and
@@ -63,8 +63,9 @@ Bun runtime behaviour, no relation to our adapter.
 **Unblocks when** Bun ships a fix or the upstream fixtures change their
 circular layout.
 
-**Re-verified 2026-07-26** on Bun 1.3.5, 1.3.14 and 1.4.0-canary — all three
-still throw. This is the only fixture skip with a measured cause.
+**Re-verified 2026-08-20** on the released Bun 1.4.0 — still throws, as it does on
+1.3.5, 1.3.14 and 1.4.0-canary (checked 2026-07-26). This is the only fixture
+skip with a measured cause.
 
 ## Fixture blocks silently inactive after an upstream layout change
 

@@ -16,7 +16,7 @@ Key capabilities:
 - File uploads via `BunFileInterceptor`, `BunFilesInterceptor`, `BunAnyFilesInterceptor` using native `Request.formData()`.
 - WebSocket via `BunWsAdapter` with Bun's native pub/sub (`subscribe` / `unsubscribe` / `publish`).
 
-Runtime requirement: **Bun ≥ 1.2.0** (engines field says `>=1.2.0`; CI pins `1.3.5`).
+Runtime requirement: **Bun ≥ 1.2.0** (engines field says `>=1.2.0`; CI pins `1.4.0`).
 
 ---
 
@@ -272,7 +272,7 @@ Runs on push/PR to `main`:
 4. **Compatibility (upstream fixtures)** — `fixtures-install.sh` + `bun run test:fixtures`
 5. **Bench smoke** — `bun run bench:quick`
 
-Bun version pinned to `1.3.5` across all jobs.
+Bun version pinned to `1.4.0` across all jobs.
 
 ### Security (`.github/workflows/security.yml`)
 Runs on push/PR to `main` + weekly schedule:
@@ -295,7 +295,7 @@ matcher can't destructure them faithfully — `bunRoutesLoseParams()` in
 `http/router.ts`. Bun then falls through to the `fetch` callback, which routes
 them through `compilePath`'s regex, so both dispatchers produce identical params.
 
-Verified against Bun 1.3.5, these forms are excluded:
+Verified against Bun 1.3.5 and re-verified on 1.4.0, these forms are excluded:
 
 | Path form | What Bun's matcher does |
 |---|---|
@@ -330,7 +330,7 @@ rather than producing into a buffer nobody drains.
 
 See `KNOWN-LIMITATIONS.md` for the authoritative list. Summaries:
 
-1. **Bun TDZ on circular imports** (`inspector` / `circular-modules` fixture skipped) — Pure Bun runtime behaviour, unrelated to this adapter. Re-verified 2026-07-26 on Bun 1.3.5, 1.3.14 and 1.4.0-canary: still broken on all three.
+1. **Bun TDZ on circular imports** (`inspector` / `circular-modules` fixture skipped) — Pure Bun runtime behaviour, unrelated to this adapter. Re-verified 2026-08-20 on the released Bun 1.4.0: still broken, as on 1.3.5, 1.3.14 and 1.4.0-canary (2026-07-26).
 2. **Silently inactive fixture blocks** (`global-prefix`, `auto-mock`, `module-utils`) — the submodule moved these fixtures' entry points, and `skipIfMissing()` renders a stale path as a green skip rather than a failure.
 
 Retracted: `lazy-modules` and `scopes` were listed here as adapter/runtime bugs. Both were faulty test setup on our side and now run unskipped — see `KNOWN-LIMITATIONS.md`. Treat any skip whose cause was inferred rather than measured as unknown until re-tested.
