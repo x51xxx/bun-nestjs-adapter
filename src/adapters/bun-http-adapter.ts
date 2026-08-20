@@ -767,7 +767,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
 
       if (matched && !matched.entry.native) {
         if (req.method === 'GET' || req.method === 'HEAD') {
-          serveStatic(matched, res)
+          serveStatic(matched, res, req)
             .then(handled => {
               if (!handled && !res.finished) {
                 this.dispatchRoutes(req, res, pathname);

@@ -65,13 +65,18 @@ function finishEmpty(res: BunResponse, status: number): void {
 
 /**
  * Serve a file from a static entry. Returns `true` when the request was
- * handled (file served, or 403 on traversal). Returns `false` on a miss
+ * handled (file served, 304, or 403 on traversal). Returns `false` on a miss
  * (no such file / path is a directory) so the caller can fall through to
  * route dispatch.
+ *
+ * Validators (`ETag` / `Last-Modified` and the conditional 304) use the same
+ * formula as the native `{ dir }` route, so a client that saw one mode and
+ * then the other revalidates instead of re-downloading.
  */
 export async function serveStatic(
   matched: StaticMatch,
   res: BunResponse,
+  req?: { headers: Record<string, unknown> },
 ): Promise<boolean> {
   const safe = normalize(matched.relPath).replace(/^[/\\]+/, '');
   if (safe.includes('..' + sep) || safe === '..') {
@@ -88,11 +93,32 @@ export async function serveStatic(
       finishEmpty(res, 500);
       return true;
     }
+    const etag = fileEtag(stat.size, stat.mtimeMs);
+    const lastModified = new Date(Math.floor(stat.mtimeMs / 1000) * 1000).toUTCString();
+    if (req) {
+      const inm = headerOf(req, 'if-none-match');
+      if (inm && weakMatch(inm, etag)) {
+        notModified(res, etag, lastModified);
+        return true;
+      }
+      const ims = headerOf(req, 'if-modified-since');
+      if (!inm && ims) {
+        const since = Date.parse(ims);
+        if (!Number.isNaN(since) && Math.floor(stat.mtimeMs / 1000) * 1000 <= since) {
+          notModified(res, etag, lastModified);
+          return true;
+        }
+      }
+    }
+
     const file = Bun.file(filePath);
     const ext = extname(filePath).toLowerCase();
     const mime = STATIC_MIME[ext] ?? 'application/octet-stream';
     res.headers['content-type'] = mime;
     res.headers['content-length'] = String(stat.size);
+    res.headers.etag = etag;
+    res.headers['last-modified'] = lastModified;
+    res.headers['accept-ranges'] = 'bytes';
     res.finished = true;
     res.headersSent = true;
     res._resolve(new Response(file, toResponseInit(res.headers, res.statusCode || 200)));

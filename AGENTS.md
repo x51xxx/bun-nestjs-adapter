@@ -16,7 +16,7 @@ Key capabilities:
 - File uploads via `BunFileInterceptor`, `BunFilesInterceptor`, `BunAnyFilesInterceptor` using native `Request.formData()`.
 - WebSocket via `BunWsAdapter` with Bun's native pub/sub (`subscribe` / `unsubscribe` / `publish`).
 
-Runtime requirement: **Bun ≥ 1.2.0** (engines field says `>=1.2.0`; CI pins `1.4.0`).
+Runtime requirement: **Bun ≥ 1.3.0** (engines field says `>=1.3.0`; CI pins `1.4.0`).
 
 ---
 

@@ -46,6 +46,6 @@ import {
 } from '@trishchuk/bun-nestjs-adapter';
 ```
 
-Runtime requirement: **Bun ≥ 1.2.0**. See also the top-level
+Runtime requirement: **Bun ≥ 1.3.0**. See also the top-level
 [`README.md`](../README.md), [`BENCHMARK.md`](../BENCHMARK.md), and
 [`KNOWN-LIMITATIONS.md`](../KNOWN-LIMITATIONS.md).

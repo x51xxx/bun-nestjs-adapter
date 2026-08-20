@@ -63,6 +63,11 @@ app.useStaticAssets(join(import.meta.dir, 'public'), {
 Served with `Bun.file()` (zero-copy where the OS allows). `prefix` and `index`
 are optional. Like CORS, a static mount uses the manual dispatcher.
 
+Responses carry a weak `ETag` and `Last-Modified`, and a conditional request
+(`If-None-Match` / `If-Modified-Since`) is answered with `304`. On Bun >= 1.4.0
+a `Range` request comes back as `206` — Bun handles that for a `Bun.file` body
+itself.
+
 ### `native: true` (Bun >= 1.4.0)
 
 ```ts
@@ -78,7 +83,9 @@ manual dispatcher. Measured locally (k6, 50 VUs, both orders): serving the files
 themselves goes from ~18.6k to ~35–40k RPS, and ordinary API routes in the same
 app gain ~3% because they get the fast path back.
 
-It is opt-in because the semantics are not the same as the classic mount:
+Caching behaves the same in both modes — one `ETag` formula, so switching a
+mount from classic to native does not invalidate what clients already hold. It
+is opt-in because the *routing* semantics are not the same:
 
 | | classic | `native: true` |
 | --- | --- | --- |
@@ -86,8 +93,6 @@ It is opt-in because the semantics are not the same as the classic mount:
 | miss under the prefix | falls through to route dispatch, ends in Nest's JSON 404 | hard `404` with an empty body — Nest's not-found handler never runs |
 | methods | `GET` / `HEAD` only | any method returns the file |
 | directory without a trailing slash | serves `index` | `301` to the trailing-slash URL |
-| validators | none | weak `ETag`, `Last-Modified`, `304` on `If-None-Match` / `If-Modified-Since` |
-| `Range` | 206 (Bun 1.4.0+ handles it for `Bun.file` bodies) | 206 |
 
 Both dispatchers are covered by `tests/integration/static-native.spec.ts`, which
 runs the same table against a clean app (native routes) and one with middleware

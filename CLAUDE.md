@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `@trishchuk/bun-nestjs-adapter` — a native Bun adapter that runs a NestJS app on `Bun.serve()` (Web Fetch API) instead of `node:http`. It implements Nest's `AbstractHttpAdapter` and `AbstractWsAdapter` end-to-end. Published source is only `src/`; everything else is tests, fixtures, and benchmarks.
 
-Runtime: **Bun ≥ 1.2.0** (CI pins 1.4.0). This is a Bun project — use `bun`, not `npm`/`node`.
+Runtime: **Bun ≥ 1.3.0** (CI pins 1.4.0). This is a Bun project — use `bun`, not `npm`/`node`.
 
 ## Commands
 
