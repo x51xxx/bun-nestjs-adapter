@@ -35,9 +35,14 @@ export type BunNativeRouteHandler = (
 ) => Response | undefined | Promise<Response | undefined>;
 
 /** `path → handler` or `path → { METHOD: handler }` map for `Bun.serve({ routes })`. */
+/** Bun 1.4.0+ static directory route: `{ '/static/*': { dir: './public' } }`. */
+export interface BunDirRoute {
+  dir: string;
+}
+
 export type BunNativeRoutes = Record<
   string,
-  BunNativeRouteHandler | Record<string, BunNativeRouteHandler>
+  BunNativeRouteHandler | Record<string, BunNativeRouteHandler> | BunDirRoute
 >;
 
 type FetchHandler = (req: Request, server?: BunServer) => Promise<Response> | Response;

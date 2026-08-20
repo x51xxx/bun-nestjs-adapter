@@ -56,7 +56,7 @@ src/                          # Published source
     versioning.ts             # applyVersionFilter (HEADER/MEDIA_TYPE/CUSTOM)
     views.ts                  # renderTemplate (ejs/hbs/pug, lazy imports)
     optional-engines.d.ts     # minimal types for untyped optional peers (ejs, pug)
-    static.ts                 # matchStatic/serveStatic, MIME map
+    static.ts                 # matchStatic/serveStatic + serveNativeStatic, MIME map
     streaming.ts              # Node Readable → web stream helpers, duck-type guards
   interceptors/
     bun-file-interceptor.ts   # ~160 LOC — file upload interceptors
@@ -69,6 +69,7 @@ tests/
   integration/                # E2E specs using bun:test + native fetch()
     bun-adapter.spec.ts       # Core adapter behaviour (routing, headers, body, params, query)
     static-assets.spec.ts     # useStaticAssets()
+    static-native.spec.ts     # useStaticAssets({ native: true }), both dispatchers
     streaming.spec.ts         # StreamableFile / Readable streaming
     uploads.spec.ts           # Multipart file upload interceptors
     websocket.spec.ts         # BunWsAdapter gateway tests
@@ -289,7 +290,12 @@ Runs on push to `main`. Uses `changesets/action` with `NPM_TOKEN` and `NPM_CONFI
 ## Dispatcher selection (which requests skip Bun's native matcher)
 
 `BunHttpAdapter.listen()` builds a `Bun.serve({ routes })` map only when no
-middleware, static-asset mount or `enableCors()` is registered. On top of that
+middleware, classic static-asset mount or `enableCors()` is registered. A mount
+opted into `useStaticAssets(root, { native: true })` (Bun >= 1.4.0) is exempt:
+it becomes a `{ dir }` entry *in* the map, so it no longer disables the fast
+path. Its semantics differ from the classic mount — routes match first, a miss
+is a hard 404, any method serves the file — and the manual dispatcher mirrors
+them in `serveNativeStatic()` so both paths agree; see `docs/http.md`. On top of that
 whole-app switch, individual **paths** are left out of the native map when Bun's
 matcher can't destructure them faithfully — `bunRoutesLoseParams()` in
 `http/router.ts`. Bun then falls through to the `fetch` callback, which routes

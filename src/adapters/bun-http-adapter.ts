@@ -1,5 +1,5 @@
 import { extname, join } from 'path';
-import { RequestMethod, VersioningOptions } from '@nestjs/common';
+import { Logger, RequestMethod, VersioningOptions } from '@nestjs/common';
 import { VersionValue } from '@nestjs/common/interfaces';
 import { NestApplicationOptions } from '@nestjs/common/interfaces/nest-application-options.interface';
 import { AbstractHttpAdapter } from '@nestjs/core';
@@ -19,7 +19,14 @@ import {
   toBunRoutePath,
 } from '../http/router';
 import { BunHttpServer, BunNativeRouteHandler, BunNativeRoutes } from '../http/server';
-import { StaticEntry, matchStatic, serveStatic } from '../http/static';
+import {
+  StaticEntry,
+  StaticMatch,
+  bunDirRoutePath,
+  matchStatic,
+  serveNativeStatic,
+  serveStatic,
+} from '../http/static';
 import {
   StreamableLike,
   isNodeReadable,
@@ -44,6 +51,22 @@ interface ServeStaticOptions {
   root?: string;
   prefix?: string;
   index?: string;
+  /**
+   * Serve this root through Bun's native `{ dir }` route (Bun >= 1.4.0).
+   *
+   * Off by default because it changes observable behaviour — see
+   * `serveNativeStatic` and `docs/static-assets.md`. What it buys: a static
+   * root no longer forces the whole app onto the manual `fetch` dispatcher,
+   * and files come back with `ETag` / `Last-Modified` / conditional 304.
+   */
+  native?: boolean;
+}
+
+/** `{ dir }` routes landed in Bun 1.4.0; older runtimes throw on the option. */
+function supportsNativeDirRoutes(): boolean {
+  if (typeof Bun === 'undefined' || typeof Bun.semver?.satisfies !== 'function')
+    return false;
+  return Bun.semver.satisfies(Bun.version, '>=1.4.0');
 }
 
 function isThenable(value: unknown): value is Promise<unknown> {
@@ -74,6 +97,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
   private errorHandler: BunErrorHandler | null = null;
   private readonly router = new BunRouterInstance();
   private readonly staticAssets: StaticEntry[] = [];
+  private readonly logger = new Logger(BunHttpAdapter.name);
   public readonly wsPaths = new Map<string, WsServerShim>();
   private viewEngine: string | null = null;
   private viewsDir = join(process.cwd(), 'views');
@@ -131,7 +155,9 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
   private canUseNativeRoutes(): boolean {
     return (
       this.router.middleware.length === 0 &&
-      this.staticAssets.length === 0 &&
+      // A native static root lives *on* the route map, so it no longer forces
+      // the manual dispatcher; a classic one still does.
+      this.staticAssets.every(entry => entry.native) &&
       this.corsOptions === null
     );
   }
@@ -187,6 +213,18 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       } else {
         out[bunPath] = methodHandler;
       }
+    }
+
+    // Native static roots are part of the map, so they survive every rebuild
+    // (a route registered after `listen()` triggers `reloadRoutes()`), and a
+    // real route always wins the key — Bun's matcher already prefers the more
+    // specific pattern, so leaving an explicit route in place keeps the two
+    // dispatchers agreeing about who owns the path.
+    for (const entry of this.staticAssets) {
+      if (!entry.native) continue;
+      const dirPath = bunDirRoutePath(entry.prefix);
+      if (dirPath in out) continue;
+      out[dirPath] = { dir: entry.root };
     }
     return out;
   }
@@ -482,10 +520,22 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       options = rootOrOptions ?? {};
     }
     if (!root) return;
+    let native = options.native === true;
+    if (native && !supportsNativeDirRoutes()) {
+      // Falling back keeps the app booting on an older runtime; throwing here
+      // would turn a performance opt-in into a hard version requirement.
+      this.logger.warn(
+        `useStaticAssets({ native: true }) needs Bun >= 1.4.0, running ${
+          typeof Bun === 'undefined' ? 'a non-Bun runtime' : Bun.version
+        } — serving '${root}' the classic way instead.`,
+      );
+      native = false;
+    }
     this.staticAssets.push({
       prefix: options.prefix ?? '/',
       root,
       index: options.index ?? 'index.html',
+      native,
     });
   }
 
@@ -695,15 +745,23 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
         }
       }
 
-      // 1. static assets fast-path (only GET/HEAD, only if any registered).
-      // A miss inside serveStatic (file not found / directory) falls through
-      // to route dispatch instead of hard-404ing — a route may own the path.
-      if (
-        this.staticAssets.length !== 0 &&
-        (req.method === 'GET' || req.method === 'HEAD')
-      ) {
-        const matched = matchStatic(this.staticAssets, pathname);
-        if (matched) {
+      // 1. static assets.
+      //
+      // A *classic* root is checked before route dispatch and only for
+      // GET/HEAD; a miss inside serveStatic (file not found / directory)
+      // falls through to route dispatch instead of hard-404ing — a route may
+      // own the path.
+      //
+      // A *native* root is the mirror image, because that is what Bun's
+      // `{ dir }` route does on the hot path: the route map is consulted
+      // first (Bun prefers the more specific pattern over `/prefix/*`), the
+      // directory answers only what is left, and its miss is a hard 404. So
+      // the match is carried into dispatch and consumed there.
+      const matched =
+        this.staticAssets.length !== 0 ? matchStatic(this.staticAssets, pathname) : null;
+
+      if (matched && !matched.entry.native) {
+        if (req.method === 'GET' || req.method === 'HEAD') {
           serveStatic(matched, res)
             .then(handled => {
               if (!handled && !res.finished) {
@@ -713,22 +771,30 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
             .catch(err => res._reject(err));
           return;
         }
+        return this.dispatchRoutes(req, res, pathname);
       }
 
-      this.dispatchRoutes(req, res, pathname);
+      this.dispatchRoutes(req, res, pathname, matched);
     });
   }
 
   /** Route + middleware dispatch shared by the plain path and the static-miss path. */
-  private dispatchRoutes(req: BunRequest, res: BunResponse, pathname: string) {
+  private dispatchRoutes(
+    req: BunRequest,
+    res: BunResponse,
+    pathname: string,
+    nativeStatic: StaticMatch | null = null,
+  ) {
+    const noRoute = () => this.finishNoRoute(req, res, pathname, nativeStatic);
+
     // Fast path — no global middleware: skip the Promise/await chain.
     if (this.router.middleware.length === 0) {
       const matches = this.router.matchAll(req.method, pathname);
       if (matches.length === 0) {
-        return this.dispatchNotFound(req, res);
+        return noRoute();
       }
       this.runRouteChain(matches, req, res, () => {
-        if (!res.finished) this.dispatchNotFound(req, res);
+        if (!res.finished) noRoute();
       });
       return;
     }
@@ -743,10 +809,10 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
         if (res.finished) return;
         const matches = this.router.matchAll(req.method, pathname);
         if (matches.length === 0) {
-          return this.dispatchNotFound(req, res);
+          return noRoute();
         }
         this.runRouteChain(matches, req, res, () => {
-          if (!res.finished) this.dispatchNotFound(req, res);
+          if (!res.finished) noRoute();
         });
       })
       .catch(err => {
@@ -814,6 +880,25 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       }
     };
     step();
+  }
+
+  /**
+   * No route matched. A native static root owns the tail of the request:
+   * it serves the file or hard-404s, and Nest's own not-found handler never
+   * runs — exactly as on the hot path, where Bun's `{ dir }` route answers
+   * without ever reaching `fetch`.
+   */
+  private finishNoRoute(
+    req: BunRequest,
+    res: BunResponse,
+    pathname: string,
+    nativeStatic: StaticMatch | null,
+  ) {
+    if (!nativeStatic) return this.dispatchNotFound(req, res);
+    const search = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+    serveNativeStatic(nativeStatic, req, res, pathname, search).catch(err =>
+      res._reject(err),
+    );
   }
 
   private dispatchNotFound(req: BunRequest, res: BunResponse) {

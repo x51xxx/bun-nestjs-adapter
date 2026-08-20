@@ -28,7 +28,7 @@ end-to-end.
 | HTTP adapter | `BunHttpAdapter` |
 | WebSocket adapter | `BunWsAdapter` |
 | File uploads | `BunFileInterceptor`, `BunFilesInterceptor`, `BunAnyFilesInterceptor` |
-| Static assets | `app.useStaticAssets(root, { prefix, index })` |
+| Static assets | `app.useStaticAssets(root, { prefix, index, native })` |
 | Streaming | return `StreamableFile` or a Node `Readable` |
 | SSE | `@Sse()` |
 

@@ -63,6 +63,42 @@ app.useStaticAssets(join(import.meta.dir, 'public'), {
 Served with `Bun.file()` (zero-copy where the OS allows). `prefix` and `index`
 are optional. Like CORS, a static mount uses the manual dispatcher.
 
+### `native: true` (Bun >= 1.4.0)
+
+```ts
+app.useStaticAssets(join(import.meta.dir, 'public'), {
+  prefix: '/static',
+  native: true,
+});
+```
+
+Bun 1.4.0 added directory routes (`{ '/static/*': { dir } }`), so a static mount
+can live **on the native route map** instead of forcing the whole app onto the
+manual dispatcher. Measured locally (k6, 50 VUs, both orders): serving the files
+themselves goes from ~18.6k to ~35–40k RPS, and ordinary API routes in the same
+app gain ~3% because they get the fast path back.
+
+It is opt-in because the semantics are not the same as the classic mount:
+
+| | classic | `native: true` |
+| --- | --- | --- |
+| order | static is tried **before** routes | routes match **first**; the directory answers what is left |
+| miss under the prefix | falls through to route dispatch, ends in Nest's JSON 404 | hard `404` with an empty body — Nest's not-found handler never runs |
+| methods | `GET` / `HEAD` only | any method returns the file |
+| directory without a trailing slash | serves `index` | `301` to the trailing-slash URL |
+| validators | none | weak `ETag`, `Last-Modified`, `304` on `If-None-Match` / `If-Modified-Since` |
+| `Range` | 206 (Bun 1.4.0+ handles it for `Bun.file` bodies) | 206 |
+
+Both dispatchers are covered by `tests/integration/static-native.spec.ts`, which
+runs the same table against a clean app (native routes) and one with middleware
+(manual dispatcher). One divergence is out of the adapter's hands and is
+asserted there rather than hidden: Bun resolves dot-segments in `Request.url`
+before the `fetch` callback runs, so `/static/sub/%2e%2e/data.json` is a `404`
+natively and a collapsed `200` on the manual dispatcher. Nothing outside `root`
+is reachable on either path.
+
+On Bun < 1.4.0 the flag logs a warning and falls back to the classic mount.
+
 ## The `req` / `res` shims
 
 Handlers receive Express-flavoured `req`/`res` objects built over the Web
