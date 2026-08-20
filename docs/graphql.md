@@ -60,11 +60,19 @@ await app.listen(3000);
 ### Apollo vs. Yoga on bun
 
 In the local benchmark (`bun run tests/bench/run-matrix.ts --with-yoga`) the
-Yoga driver is consistently **~+37–46 % RPS** over Apollo on bun, with lower tail
-latency, at comparable RSS — because it skips the Node req/res bridge Apollo
-goes through. See the "GraphQL driver: Apollo vs Yoga (on bun)" section of
-[`BENCHMARK.md`](../BENCHMARK.md). Numbers are hardware- and version-specific;
-re-measure on your target.
+Yoga driver is consistently ahead of Apollo on bun, with lower tail latency at
+comparable RSS — because it skips the Node req/res bridge Apollo goes through.
+Measured 2026-08-20 on Bun 1.4.0:
+
+| size | Apollo RPS | Yoga RPS | Δ RPS | Apollo p99 | Yoga p99 | Δ p99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| small | 3305 | **5235** | +58.4 % | 18.3 | 11.0 | −40.1 % |
+| medium | 3203 | **4944** | +54.4 % | 31.2 | 20.1 | −35.6 % |
+| large | 3375 | **5294** | +56.9 % | 53.4 | 33.0 | −38.2 % |
+
+Full report: [`BENCHMARK-yoga-1.4.0.md`](../BENCHMARK-yoga-1.4.0.md) (GraphQL-only
+matrix; the default [`BENCHMARK.md`](../BENCHMARK.md) excludes the Yoga target).
+Numbers are hardware- and version-specific; re-measure on your target.
 
 > If a published, supported `BunYogaDriver` is something you want, it's tracked
 > on the roadmap in the top-level [`README.md`](../README.md).

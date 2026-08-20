@@ -42,6 +42,13 @@ Yoga on the *same* `BunHttpAdapter` is +71.9% over Apollo-on-bun and +54% over
 Apollo-on-express — it bypasses the `req`/`res` bridge and takes the raw Web
 `Request`.
 
+Re-measured on the released Bun 1.4.0 (2026-08-20, `BENCHMARK-yoga-1.4.0.md`) the
+bridge cost is unchanged in kind and slightly smaller in size: Yoga is +58.4% /
++54.4% / +56.9% over Apollo-on-bun at small/medium/large, and +55.0% over
+Apollo-on-express at medium (4944 vs 3190). The gap holds its shape across the
+runtime upgrade, which is what the bridge explanation predicts: the cost sits in
+`@as-integrations/express5`, not in anything 1.4.0 changed.
+
 Two hypotheses that were measured and **rejected**:
 
 - *"Apollo's two `use()` calls disable the native-routes fast path, and the manual
