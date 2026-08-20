@@ -8,21 +8,22 @@ Internals worth knowing before changing the adapter. Source:
 
 Chosen in `BunHttpAdapter.listen()`:
 
-- **Fast path** — when there's no adapter-level `use()` middleware, static-asset
-  mount, or CORS, the route table is compiled into a `Bun.serve({ routes })` map
-  (`buildBunRoutes()`) and matched by Bun's native C++ router. Route handlers
-  (`runBunRouteSingle` / `runBunRouteChain`) run with minimal per-request
-  allocation.
-- **Slow path** — any middleware/static/CORS forces the manual `fetch`
-  dispatcher (`handle()`), which does its own regex matching and `next()`-style
-  chaining.
+- **Fast path** — when there's no adapter-level `use()` middleware, *classic*
+  static-asset mount, or CORS, the route table is compiled into a
+  `Bun.serve({ routes })` map (`buildBunRoutes()`) and matched by Bun's native
+  C++ router. Route handlers (`runBunRouteSingle` / `runBunRouteChain`) run with
+  minimal per-request allocation. A `useStaticAssets(root, { native: true })`
+  mount is part of that map (a `{ dir }` entry), so it keeps the fast path.
+- **Slow path** — any middleware/CORS or classic static mount forces the manual
+  `fetch` dispatcher (`handle()`), which does its own regex matching and
+  `next()`-style chaining.
 
-**Consequence:** the fast path freezes the route map at boot. The adapter
-mitigates this by rebuilding and calling `server.reload({ routes })` whenever a
-route or middleware is registered after `listen()` (`reloadRoutes()`); if
-middleware/CORS/static appears, `reload()` switches the server to the `fetch`
-dispatcher. Dynamic-route edge cases are tracked in
-[`KNOWN-LIMITATIONS.md`](../KNOWN-LIMITATIONS.md).
+**The map is not frozen at boot.** Registering a route, a middleware or a static
+mount while the server is listening rebuilds it and hot-swaps it through
+`server.reload({ routes })` (`reloadRoutes()`), so lazily-loaded routes are
+reachable; if middleware/CORS or a classic static mount appears, the same call
+clears the map and moves the server onto the `fetch` dispatcher. Dynamic-route
+edge cases are tracked in [`KNOWN-LIMITATIONS.md`](../KNOWN-LIMITATIONS.md).
 
 ## Request / response are shims, not Node objects
 
