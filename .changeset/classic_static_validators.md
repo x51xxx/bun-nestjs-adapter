@@ -15,6 +15,10 @@ and `native: true` modes hand out byte-identical validators for the same file â€
 switching a mount from one to the other does not invalidate what clients already
 cached. That equality is asserted in `tests/integration/static-assets.spec.ts`.
 
+A 304 from a native mount keeps `content-type` (that is what Bun's own dir route
+does) while a classic one drops it, as `serve-static` does; each mode is
+identical across both dispatchers, which is the property the tests pin.
+
 `Range` needed no work: from Bun 1.4.0 a `Bun.file` body answers `206` on its
 own, rewriting the `content-length` we set. Both are now covered by tests, the
 `206` one gated on the runtime version.

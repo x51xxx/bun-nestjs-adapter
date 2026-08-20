@@ -87,6 +87,17 @@ describe('platform-bun :: useStaticAssets', () => {
     expect(res.status).toBe(304);
   });
 
+  it('answers a conditional HEAD with 304', async () => {
+    const first = await fetch(`${baseUrl}/static/data.json`);
+    await first.text();
+    const res = await fetch(`${baseUrl}/static/data.json`, {
+      method: 'HEAD',
+      headers: { 'if-none-match': first.headers.get('etag')! },
+    });
+    expect(res.status).toBe(304);
+    expect((await res.text()).length).toBe(0);
+  });
+
   it('re-sends the file when the validator does not match', async () => {
     const res = await fetch(`${baseUrl}/static/data.json`, {
       headers: { 'if-none-match': 'W/"deadbeef-deadbeef"' },

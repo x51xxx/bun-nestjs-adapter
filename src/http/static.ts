@@ -101,6 +101,8 @@ export async function serveStatic(
         notModified(res, etag, lastModified);
         return true;
       }
+      // RFC 9110 §13.1.3: `If-Modified-Since` only applies when the request
+      // carries no `If-None-Match`. Deliberate — do not "fix" into an `||`.
       const ims = headerOf(req, 'if-modified-since');
       if (!inm && ims) {
         const since = Date.parse(ims);
@@ -182,9 +184,18 @@ function weakMatch(ifNoneMatch: string, etag: string): boolean {
   return ifNoneMatch.split(',').some(v => bare(v) === bare(etag));
 }
 
-function notModified(res: BunResponse, etag: string, lastModified: string): void {
+function notModified(
+  res: BunResponse,
+  etag: string,
+  lastModified: string,
+  contentType?: string,
+): void {
   res.headers.etag = etag;
   res.headers['last-modified'] = lastModified;
+  // Bun's native dir route keeps `content-type` on a 304; the classic mount
+  // drops it, the way `serve-static` does. Each mode stays self-consistent
+  // across both dispatchers, which is the property that matters.
+  if (contentType) res.headers['content-type'] = contentType;
   finishEmpty(res, 304);
 }
 
@@ -246,24 +257,30 @@ export async function serveNativeStatic(
     Math.floor(targetStat.mtimeMs / 1000) * 1000,
   ).toUTCString();
 
-  const inm = headerOf(req, 'if-none-match');
-  if (inm && weakMatch(inm, etag)) return notModified(res, etag, lastModified);
-  const ims = headerOf(req, 'if-modified-since');
-  if (!inm && ims) {
-    const since = Date.parse(ims);
-    if (!Number.isNaN(since) && Math.floor(targetStat.mtimeMs / 1000) * 1000 <= since) {
-      return notModified(res, etag, lastModified);
-    }
-  }
-
   if (typeof Bun === 'undefined' || typeof Bun.file !== 'function') {
     return finishEmpty(res, 500);
   }
   const file = Bun.file(target);
   // Take the content type from `Bun.file` rather than our own table so both
-  // dispatchers label the same file identically.
-  res.headers['content-type'] =
+  // dispatchers label the same file identically — including on a 304, which
+  // Bun's own dir route answers with the type still attached.
+  const contentType =
     file.type || STATIC_MIME[extname(target).toLowerCase()] || 'application/octet-stream';
+
+  const inm = headerOf(req, 'if-none-match');
+  if (inm && weakMatch(inm, etag))
+    return notModified(res, etag, lastModified, contentType);
+  // RFC 9110 §13.1.3: `If-Modified-Since` is only consulted when the request
+  // carries no `If-None-Match`. Deliberate — do not "fix" into an `||`.
+  const ims = headerOf(req, 'if-modified-since');
+  if (!inm && ims) {
+    const since = Date.parse(ims);
+    if (!Number.isNaN(since) && Math.floor(targetStat.mtimeMs / 1000) * 1000 <= since) {
+      return notModified(res, etag, lastModified, contentType);
+    }
+  }
+
+  res.headers['content-type'] = contentType;
   res.headers.etag = etag;
   res.headers['last-modified'] = lastModified;
   res.headers['accept-ranges'] = 'bytes';

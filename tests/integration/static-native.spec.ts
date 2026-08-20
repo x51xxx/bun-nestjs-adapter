@@ -150,6 +150,32 @@ describeNative('platform-bun :: useStaticAssets({ native: true })', () => {
         expect((await res.text()).length).toBe(0);
       });
 
+      it('keeps the validators and the type on the 304', async () => {
+        const first = await fetch(`${h().baseUrl}/static/data.json`);
+        await first.text();
+        const res = await fetch(`${h().baseUrl}/static/data.json`, {
+          headers: { 'if-none-match': first.headers.get('etag')! },
+        });
+        await res.text();
+        expect(res.status).toBe(304);
+        expect(res.headers.get('etag')).toBe(first.headers.get('etag'));
+        expect(res.headers.get('last-modified')).toBe(first.headers.get('last-modified'));
+        // Bun's dir route leaves `content-type` on a 304 — the manual path has
+        // to do the same or the two dispatchers would answer differently.
+        expect(res.headers.get('content-type')).toBe(first.headers.get('content-type'));
+      });
+
+      it('answers a conditional HEAD with 304', async () => {
+        const first = await fetch(`${h().baseUrl}/static/data.json`);
+        await first.text();
+        const res = await fetch(`${h().baseUrl}/static/data.json`, {
+          method: 'HEAD',
+          headers: { 'if-none-match': first.headers.get('etag')! },
+        });
+        expect(res.status).toBe(304);
+        expect((await res.text()).length).toBe(0);
+      });
+
       it('answers a conditional request with 304 (If-Modified-Since)', async () => {
         const first = await fetch(`${h().baseUrl}/static/data.json`);
         await first.text();
@@ -262,6 +288,19 @@ describeNative('platform-bun :: useStaticAssets({ native: true })', () => {
     expect(b.headers.get('etag')).toBe(a.headers.get('etag'));
     expect(b.headers.get('last-modified')).toBe(a.headers.get('last-modified'));
     expect(b.headers.get('content-type')).toBe(a.headers.get('content-type'));
+  });
+
+  it('produces identical 304s on both dispatchers', async () => {
+    const seed = await fetch(`${fast.baseUrl}/static/data.json`);
+    await seed.text();
+    const headers = { 'if-none-match': seed.headers.get('etag')! };
+    const a = await fetch(`${fast.baseUrl}/static/data.json`, { headers });
+    const b = await fetch(`${slow.baseUrl}/static/data.json`, { headers });
+    await Promise.all([a.text(), b.text()]);
+    expect(b.status).toBe(a.status);
+    for (const name of ['etag', 'last-modified', 'content-type']) {
+      expect(b.headers.get(name)).toBe(a.headers.get(name));
+    }
   });
 });
 
