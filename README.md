@@ -152,18 +152,25 @@ export class EventsController {
 Single-route `GET /` benchmark on M-series Mac, 50 concurrent connections,
 30 seconds, **measured under a Bun-native fetch client** (autocannon's Node
 HTTP client systematically under-counts Bun.serve — see
-[`tests/bench/bun-bench.ts`](./tests/bench/bun-bench.ts)):
+[`tests/bench/bun-bench.ts`](./tests/bench/bun-bench.ts)). Measured 2026-08-20
+on Bun 1.4.0:
 
 | Target | RPS | p50 / p99 (ms) |
 | --- | ---: | ---: |
-| `bun` (raw) | 130 308 | 0.42 / 0.91 |
-| **`nest-bun` (this adapter)** | **102 319** | **0.42 / 1.00** |
-| `nest-fastify` | 84 936 | 0.53 / 1.29 |
-| `nest-express` | 69 011 | 0.66 / 1.61 |
+| `bun` (raw) | 97 269 | 0.45 / 0.90 |
+| **`nest-bun` (this adapter)** | **84 810** | **0.55 / 1.41** |
+| `nest-fastify` | 76 760 | 0.59 / 1.39 |
+| `nest-express` | 67 311 | 0.68 / 1.64 |
 
-So Nest-Bun is **+22 % vs nest-fastify** and **+48 % vs nest-express** in RPS,
-with p99 latency 23–38 % lower. Numbers fluctuate ±15 % across runs due to
-thermal throttling — re-measure on your hardware:
+So Nest-Bun is **+10 % vs nest-fastify** and **+26 % vs nest-express** in RPS,
+with p99 14 % below nest-express and level with nest-fastify. The margins are
+narrower than the previously published Bun 1.3.5 run (+22 % / +48 %, different
+session and host, so treat the absolute drop as noise). The same narrowing shows
+up in the session-controlled k6 matrix: Bun 1.4.0 sped up the `node:http` layer
+that express/fastify ride on more than it sped up the fetch-native path — see
+[`BENCHMARK-FINDINGS.md`](./BENCHMARK-FINDINGS.md).
+Numbers fluctuate ±15 % across runs due to thermal throttling — re-measure on
+your hardware:
 
 ```bash
 bun run bench
