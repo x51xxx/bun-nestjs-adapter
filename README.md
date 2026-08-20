@@ -241,8 +241,8 @@ scripts/
 - [x] Shared-port WebSocket upgrade — `@WebSocketGateway()` with no port shares
       the HTTP server's `Bun.serve`.
 - [~] GraphQL Yoga driver (`BunYogaDriver`) — fetch-native driver prototyped and
-      benchmarked (bench-only, ~+40 % RPS vs Apollo on bun); not yet a published
-      export.
+      benchmarked (bench-only, ~+54–58 % RPS vs Apollo on bun on Bun 1.4.0); not
+      yet a published export.
 - [x] `setViewEngine` + `render()` — `ejs` / `pug` / `handlebars` via optional
       peer deps (install the engine you use; not bundled).
 - [x] Cookie helper — `res.cookie` / `res.clearCookie`, signed cookies

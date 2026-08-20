@@ -43,7 +43,8 @@ Apollo-on-express — it bypasses the `req`/`res` bridge and takes the raw Web
 `Request`.
 
 Re-measured on the released Bun 1.4.0 (2026-08-20, `BENCHMARK-yoga-1.4.0.md`) the
-bridge cost is unchanged in kind and slightly smaller in size: Yoga is +58.4% /
+bridge cost is unchanged in kind and smaller in size than the July k6 figure
+(medium +71.9% → +54.4%, because Apollo-on-bun itself got faster): Yoga is +58.4% /
 +54.4% / +56.9% over Apollo-on-bun at small/medium/large, and +55.0% over
 Apollo-on-express at medium (4944 vs 3190). The gap holds its shape across the
 runtime upgrade, which is what the bridge explanation predicts: the cost sits in
