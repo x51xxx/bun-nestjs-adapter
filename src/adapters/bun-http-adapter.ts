@@ -537,6 +537,11 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       index: options.index ?? 'index.html',
       native,
     });
+    // A mount registered after `listen()` has to reach the live route map:
+    // a native one belongs *in* it, and a classic one has to tear it down.
+    if (this.httpServer?.listening) {
+      this.reloadRoutes();
+    }
   }
 
   public setViewEngine(engine: string) {

@@ -31,6 +31,18 @@ class ShadowController {
 @Module({ controllers: [ShadowController] })
 class AppModule {}
 
+@Controller()
+class CollisionController {
+  // Occupies the very key the `{ dir }` entry wants: `/assets/*`.
+  @Get('assets/*')
+  wildcard() {
+    return { from: 'route-wildcard' };
+  }
+}
+
+@Module({ controllers: [CollisionController] })
+class CollisionModule {}
+
 /**
  * `fetch()` normalises `%2e%2e` and `..` in the request target before the
  * request leaves the client, so a traversal attempt has to be written onto
@@ -62,6 +74,7 @@ interface Harness {
   baseUrl: string;
   close(): Promise<void>;
   nativeRouteMap: boolean;
+  adapter: BunHttpAdapter;
 }
 
 /**
@@ -72,7 +85,8 @@ interface Harness {
  */
 async function boot(withMiddleware: boolean): Promise<Harness> {
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-  const app = moduleRef.createNestApplication(new BunHttpAdapter(), { logger: false });
+  const adapter = new BunHttpAdapter();
+  const app = moduleRef.createNestApplication(adapter, { logger: false });
   if (withMiddleware) {
     app.use((_req: any, _res: any, next: any) => next());
   }
@@ -85,6 +99,7 @@ async function boot(withMiddleware: boolean): Promise<Harness> {
     baseUrl: `http://127.0.0.1:${addr.port}`,
     close: () => app.close(),
     nativeRouteMap: app.getHttpServer().routes !== undefined,
+    adapter,
   };
 }
 
@@ -225,6 +240,21 @@ describeNative('platform-bun :: useStaticAssets({ native: true })', () => {
     expect(await rawGet(slow.baseUrl, '/static/sub/%2e%2e/data.json')).toBe(200);
   });
 
+  it('survives a route registered after listen()', async () => {
+    // `registerRoute` rebuilds the whole native map while the server is live;
+    // the `{ dir }` entries have to be re-emitted or the static mount would
+    // quietly vanish the first time a lazy module adds a route.
+    fast.adapter.get('/late', (_req: any, res: any) => res.json({ late: true }));
+
+    const late = await fetch(`${fast.baseUrl}/late`);
+    expect(late.status).toBe(200);
+    expect(await late.json()).toEqual({ late: true });
+
+    const still = await fetch(`${fast.baseUrl}/static/data.json`);
+    expect(still.status).toBe(200);
+    expect(still.headers.get('etag')).toBeTruthy();
+  });
+
   it('produces identical validators on both dispatchers', async () => {
     const a = await fetch(`${fast.baseUrl}/static/data.json`);
     const b = await fetch(`${slow.baseUrl}/static/data.json`);
@@ -232,5 +262,56 @@ describeNative('platform-bun :: useStaticAssets({ native: true })', () => {
     expect(b.headers.get('etag')).toBe(a.headers.get('etag'));
     expect(b.headers.get('last-modified')).toBe(a.headers.get('last-modified'));
     expect(b.headers.get('content-type')).toBe(a.headers.get('content-type'));
+  });
+});
+
+describeNative('platform-bun :: native static vs a route on the same key', () => {
+  let fast: Harness;
+  let slow: Harness;
+
+  async function bootCollision(withMiddleware: boolean): Promise<Harness> {
+    const moduleRef = await Test.createTestingModule({
+      imports: [CollisionModule],
+    }).compile();
+    const adapter = new BunHttpAdapter();
+    const app = moduleRef.createNestApplication(adapter, { logger: false });
+    if (withMiddleware) {
+      app.use((_req: any, _res: any, next: any) => next());
+    }
+    app.useStaticAssets(ROOT, { prefix: '/assets', native: true });
+    await app.init();
+    await app.listen(0, '127.0.0.1');
+    const addr = app.getHttpServer().address();
+    return {
+      baseUrl: `http://127.0.0.1:${addr.port}`,
+      close: () => app.close(),
+      nativeRouteMap: app.getHttpServer().routes !== undefined,
+      adapter,
+    };
+  }
+
+  beforeAll(async () => {
+    fast = await bootCollision(false);
+    slow = await bootCollision(true);
+  });
+
+  afterAll(async () => {
+    await fast.close();
+    await slow.close();
+  });
+
+  it('gives the key to the route, on both dispatchers', async () => {
+    for (const h of [fast, slow]) {
+      const res = await fetch(`${h.baseUrl}/assets/data.json`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ from: 'route-wildcard' });
+    }
+  });
+
+  it('agrees about a method the route does not declare', async () => {
+    const a = await fetch(`${fast.baseUrl}/assets/data.json`, { method: 'POST' });
+    const b = await fetch(`${slow.baseUrl}/assets/data.json`, { method: 'POST' });
+    expect(b.status).toBe(a.status);
+    expect(await b.text()).toBe(await a.text());
   });
 });

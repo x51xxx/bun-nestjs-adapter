@@ -8,8 +8,10 @@ A classic static mount is handled inside the manual `fetch` dispatcher, which
 means registering one drops the **whole app** off the `Bun.serve({ routes })`
 fast path. Bun 1.4.0 added directory routes, so the mount can instead become a
 `{ dir }` entry in the route map. Measured locally with k6 (50 VUs, both
-orders): serving the files goes from ~18.6k to ~35–40k RPS, and ordinary API
-routes in the same app recover ~3% by getting the fast path back.
+orders, M-series Mac, a small in-repo JSON fixture served from page cache):
+serving the files goes from ~18.6k to ~35–40k RPS, and ordinary API routes in
+the same app recover ~3% by getting the fast path back. Expect a smaller
+relative gain for large assets, where the transfer dominates.
 
 Opt-in, because the native route is not semantically identical to the classic
 mount: routes are matched **before** the directory (rather than static-first), a

@@ -97,6 +97,11 @@ before the `fetch` callback runs, so `/static/sub/%2e%2e/data.json` is a `404`
 natively and a collapsed `200` on the manual dispatcher. Nothing outside `root`
 is reachable on either path.
 
+If a Nest route already owns the `/prefix/*` key (e.g. `@Get('assets/*')`), the
+route keeps it and the directory answers only the methods the route does not
+declare — the same on both dispatchers. A mount registered after `listen()`
+rebuilds the live route map, so it takes effect immediately.
+
 On Bun < 1.4.0 the flag logs a warning and falls back to the classic mount.
 
 ## The `req` / `res` shims
