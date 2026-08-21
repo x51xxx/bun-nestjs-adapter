@@ -10,8 +10,10 @@ At medium/large load on Bun 1.3.5/1.4.0-canary the `graphql-nest-bun` target sat
 The cause is the **driver integration path, not the adapter**.
 
 > On the released Bun 1.4.0 (2026-08-20) the GraphQL gap no longer reproduces —
-> `bun` lands at −1.6% (small), +1.8% (medium), +0.8% (large) against `express`,
-> i.e. level within run-to-run noise. The structural finding below is unchanged:
+> against `express` `bun` lands at −1.6% (small), +1.8% (medium), +0.8% (large),
+> i.e. level within run-to-run noise. (The standings table further down compares
+> against the *better* of the two rivals, so its GraphQL row reads slightly
+> differently for medium.) The structural finding below is unchanged:
 > Apollo reaches the adapter through the Express bridge, and Yoga on the same
 > adapter is far faster than either.
 
@@ -73,34 +75,52 @@ spot (largest single frame `dispatchRoutes`, 2.42%).
 
 ## Bun 1.4.0 — what the runtime upgrade did to the standings
 
-Bun 1.4.0 shipped final on 2026-08-20 and is now the pinned CI runtime; `BENCHMARK.md`
-was regenerated against it on the same host as the 2026-07-26 canary session.
+Measured on the **released** 1.4.0 against a 1.3.5 baseline on the same host and
+the same adapter code: `BENCHMARK.md` (1.4.0, 2026-08-20) and
+`BENCHMARK-1.3.5-2026-08-21.md` (1.3.5, run under a `bun@1.3.5` binary from npm).
 
-**The canary preview held.** Bun 1.4.0 speeds up the `node:http` compatibility layer
-that `express`/`fastify` depend on more than it speeds up our fetch-native path, so
-every target gained and **the adapter's relative REST lead narrowed** — but it did
-not disappear.
+Every target gained, and **the `node:http` frameworks gained roughly half again
+as much as we did** — 1.4.0 rewrote the compatibility layer `express`/`fastify`
+ride on, and our fetch-native path never used it:
 
-Lead of `rest-nest-bun` over the best rival (`fastify`). The first two columns are
-the same session and the same code; the third is today's regeneration, so read it as
-a standings check rather than a controlled A/B:
+| load | target | 1.3.5 | 1.4.0 | Δ RPS | Δ p99 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| REST large | `rest-nest-bun` | 13 081 | 16 210 | +23.9% | −17.6% |
+| REST large | `rest-nest-fastify` | 10 917 | 15 123 | **+38.5%** | −36.2% |
+| REST large | `rest-nest-express` | 10 270 | 14 021 | **+36.5%** | −37.4% |
+| GraphQL large | `graphql-nest-bun` | 2 693 | 3 402 | +26.3% | −3.4% |
+| GraphQL large | `graphql-nest-fastify` | 2 518 | 3 317 | +31.7% | −35.0% |
+| GraphQL large | `graphql-nest-express` | 2 541 | 3 374 | +32.8% | −45.0% |
 
-| size | 1.3.5 (2026-07-26) | 1.4.0-canary (2026-07-26) | 1.4.0 released (2026-08-20) |
-| --- | ---: | ---: | ---: |
-| small | +5.7% | +7.1% | +8.4% |
-| medium | +10.5% | +8.0% | +6.3% |
-| large | +19.1% | +7.3% | +7.2% |
+So the adapter's lead narrowed — it did not disappear on REST, and it did
+disappear on GraphQL:
 
-Released-1.4.0 totals at large load (100 conn × 15s): `rest-nest-bun` 16 210 RPS /
-p99 11.2 ms / RSS avg 223.9 MB, `rest-nest-fastify` 15 123 / 12.0 / 271.9,
-`rest-nest-express` 14 021 / 12.9 / 255.9. The memory gap is the part the runtime
-upgrade did *not* erode — the adapter still runs ~30–50 MB leaner than both rivals
-at every load size, because there is no `node:http` object graph per request.
+| | REST 1.3.5 | REST 1.4.0 | GraphQL 1.3.5 | GraphQL 1.4.0 |
+| --- | ---: | ---: | ---: | ---: |
+| small | +7.7% | +8.4% | +6.5% | −1.6% |
+| medium | +10.7% | +6.3% | +2.1% | +0.8% |
+| large | **+19.8%** | **+7.2%** | +6.0% | +0.8% |
 
-Absolute RPS is higher across the board than in the July session (e.g. `rest-nest-bun`
-large 13 410 → 16 210), but that number mixes three things: the runtime, the adapter
-changes committed since 2026-07-27, and machine state. Only the within-session ratios
-above compare cleanly.
+(lead of `*-nest-bun` over the better of `express`/`fastify`.)
 
-Raw matrices: `BENCHMARK.md` (released 1.4.0), `BENCHMARK-1.4.0-canary.md`,
-`BENCHMARK-1.3.5-control.md`.
+Memory is the one axis where the gap did not move our way: `rest-nest-bun` RSS
+avg at large load went 212.1 → 223.9 MB while `fastify` fell 288.8 → 271.9 and
+`express` 261.7 → 255.9. We are still the leanest by ~30–50 MB, but 1.4.0 spent
+some of our advantage.
+
+**On the measurement.** The two matrices come from different sessions, so a
+same-session paired control was run last (REST, 100 VUs × 15 s, the two runtimes
+back to back): `bun` 12 918 → 15 759 (+22.0%), `fastify` 11 034 → 14 895
+(+35.0%), `express` 10 288 → 13 283 (+29.1%), lead +17.1% → +5.8%. That
+reproduces the table above within a couple of points, including the ordering of
+who gained most.
+
+A same-session 1.4.0 matrix was also run and **discarded**: worst-cell stddev
+21.9% against 4.5% for the matrix actually used, because desktop load (a VPN
+client pinning a core) drifted through it. Numbers that noisy cannot resolve a
+10% runtime difference — re-run on an idle machine before trusting any figure
+with a band that wide.
+
+The earlier 1.4.0-canary preview (2026-07-26, `BENCHMARK-1.4.0-canary.md` with
+`BENCHMARK-1.3.5-control.md` beside it) called the same shape from a prerelease:
+REST lead +19.1% → +7.3% at large. It is kept for the record.
