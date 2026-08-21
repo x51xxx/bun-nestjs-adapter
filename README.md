@@ -163,14 +163,21 @@ on Bun 1.4.0:
 | `nest-express` | 67 311 | 0.68 / 1.64 |
 
 So Nest-Bun is **+10 % vs nest-fastify** and **+26 % vs nest-express** in RPS,
-with p99 14 % below nest-express and level with nest-fastify. The margins are
-narrower than the previously published Bun 1.3.5 run (+22 % / +48 %, different
-session and host, so treat the absolute drop as noise). The same narrowing shows
-up in the session-controlled k6 matrix: Bun 1.4.0 sped up the `node:http` layer
-that express/fastify ride on more than it sped up the fetch-native path — see
+with p99 14 % below nest-express and level with nest-fastify.
+
+These margins are narrower than what this table showed on Bun 1.3.5
+(+22 % / +48 %). The absolute figures there came from another machine and are
+not comparable, but the narrowing itself is real and measured: running the k6
+matrix on **both runtimes on this host with the same code**, 1.3.5 → 1.4.0 is
++36.5 % for `nest-express` and +38.5 % for `nest-fastify` against +23.9 % for
+this adapter, because 1.4.0 rewrote the `node:http` layer they ride on and we
+never used. Full tables and the paired control in
 [`BENCHMARK-FINDINGS.md`](./BENCHMARK-FINDINGS.md).
-Numbers fluctuate ±15 % across runs due to thermal throttling — re-measure on
-your hardware:
+
+Numbers fluctuate ±15 % across runs due to thermal throttling, and this harness
+drives load with an in-process Bun `fetch` client that saturates before a fast
+server does — the k6-driven [`BENCHMARK.md`](./BENCHMARK.md) is the more
+trustworthy instrument for cross-adapter claims. Re-measure on your hardware:
 
 ```bash
 bun run bench
