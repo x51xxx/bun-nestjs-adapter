@@ -1,7 +1,12 @@
 version: 2
 updates:
-  # ----- npm dependencies (production + dev) -----
-  - package-ecosystem: 'npm'
+  # ----- Bun dependencies (production + dev) -----
+  # Must be 'bun', not 'npm': the only lockfile here is bun.lock, and the npm
+  # ecosystem cannot update it — those PRs changed package.json alone and every
+  # job died on `bun install --frozen-lockfile`. Trade-off: Dependabot's bun
+  # ecosystem does version updates only, not security updates (alerts still
+  # fire; Snyk + `bun audit` in security.yml remain the scanning baseline).
+  - package-ecosystem: 'bun'
     directory: '/'
     schedule:
       interval: 'weekly'
@@ -9,11 +14,9 @@ updates:
       time: '06:00'
       timezone: 'Europe/Kyiv'
     open-pull-requests-limit: 5
-    versioning-strategy: 'increase-if-necessary'
     commit-message:
       prefix: 'chore(deps)'
       prefix-development: 'chore(deps-dev)'
-      include: 'scope'
     labels:
       - 'dependencies'
     groups:
@@ -61,7 +64,6 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: 'chore(ci)'
-      include: 'scope'
     labels:
       - 'dependencies'
       - 'ci'
@@ -75,6 +77,5 @@ updates:
     open-pull-requests-limit: 1
     commit-message:
       prefix: 'test(fixtures)'
-      include: 'scope'
     labels:
       - 'fixtures'
