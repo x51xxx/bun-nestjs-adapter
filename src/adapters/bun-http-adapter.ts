@@ -15,6 +15,7 @@ import {
   BunRouterInstance,
   CompiledRoute,
   bunRoutesLoseParams,
+  isBunNativeMethod,
   matchesPathPrefix,
   toBunRoutePath,
 } from '../http/router';
@@ -176,12 +177,18 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       const bunPath = toBunRoutePath(path);
       const methodHandler: Record<string, BunNativeRouteHandler> = {};
       for (const [method, handlers] of methodMap) {
+        // SEARCH, QUERY and the WebDAV verbs are not valid keys on a Bun route
+        // object — see isBunNativeMethod(). Leaving them out drops them to the
+        // `fetch` callback, which our manual dispatcher serves; keeping them in
+        // would make `Bun.serve()` throw and take down `listen()`. `ALL` is
+        // skipped here too and collapsed into a bare function route below.
+        if (!isBunNativeMethod(method)) continue;
         // Keep a closure that reuses the prepared handler list. For a single
         // handler we run it directly; for many (versioning, ALL+specific)
         // we walk the chain with `next()` semantics. Either way, returning
         // `undefined` from the route handler triggers Bun to fall through
         // to the `fetch` callback (which then renders our 404 JSON).
-        if (handlers.length === 1 && method !== 'ALL') {
+        if (handlers.length === 1) {
           const h = handlers[0];
           methodHandler[method] = (req, server) => this.runBunRouteSingle(req, h, server);
         } else {
@@ -210,9 +217,12 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
             : allHandlers;
           return this.runBunRouteChain(req, queue, server);
         };
-      } else {
+      } else if (Object.keys(methodHandler).length > 0) {
         out[bunPath] = methodHandler;
       }
+      // A path whose only verbs are non-native (e.g. `@Search()` alone) stays
+      // off the map entirely — an empty route object would claim the path
+      // without being able to serve any method on it.
     }
 
     // Native static roots are part of the map, so they survive every rebuild
@@ -267,6 +277,13 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
   }
   public override search(...args: unknown[]) {
     return this.registerRoute('SEARCH', args);
+  }
+  // The QUERY verb landed in Nest 12. Without this override the base
+  // `AbstractHttpAdapter.query()` delegates to `this.instance.query(...)` —
+  // and our `instance` is `undefined`, so a single `@QueryMethod()` route
+  // crashed the whole bootstrap instead of registering.
+  public override query(...args: unknown[]) {
+    return this.registerRoute('QUERY', args);
   }
   public override use(...args: unknown[]) {
     let prefix = '/';

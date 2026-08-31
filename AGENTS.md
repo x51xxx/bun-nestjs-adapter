@@ -26,7 +26,7 @@ Runtime requirement: **Bun ≥ 1.3.0** (engines field says `>=1.3.0`; CI pins `1
 |-------|------|
 | Runtime | Bun (native `Bun.serve`, `bun:test`, `bun install`) |
 | Language | TypeScript 5.x (`target: ES2022`, `module: Preserve`, `moduleResolution: bundler`) |
-| Framework integration | NestJS 10.x / 11.x peer dependencies (`@nestjs/common`, `@nestjs/core`, `@nestjs/websockets`) |
+| Framework integration | NestJS 10.x / 11.x / 12.x peer dependencies (`@nestjs/common`, `@nestjs/core`, `@nestjs/websockets`) |
 | Bundler | `tsup` (ESM + CJS, declaration maps, source maps) |
 | Linter / Formatter | `biome` (v1.9.4) — NOT ESLint/Prettier |
 | Testing | `bun:test` (native Bun test runner) |
@@ -313,6 +313,18 @@ Verified against Bun 1.3.5 and re-verified on 1.4.0, these forms are excluded:
 Plain `:param` and bare `*` stay native. When touching `compilePath`, re-check
 this predicate: a form our regex supports but Bun mis-parses must be listed here
 or the two paths silently disagree.
+
+A second opt-out works per **method** rather than per path. A Bun route object
+accepts only `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD` and `OPTIONS` as
+keys — `isBunNativeMethod()` in `http/router.ts`. Anything else (`SEARCH`,
+Nest 12's `QUERY`, the WebDAV verbs) makes `Bun.serve()` throw
+`ERR_INVALID_ARG_TYPE`, taking down `listen()` rather than 404ing one route, so
+`buildBunRoutes()` leaves those keys out. Bun falls through to `fetch` for any
+method a route object doesn't list, so the odd verb is served by the manual
+dispatcher while the standard verbs on the same path keep the fast path; a path
+whose *only* verbs are non-native leaves the map entirely. `ALL` is excluded
+too — it is collapsed into a bare function route, which Bun invokes for every
+method.
 
 `HEAD` is served from the `GET` handler on both dispatchers when no explicit
 `@Head()` route exists. Bun strips the body itself; `makeBunResponse` additionally

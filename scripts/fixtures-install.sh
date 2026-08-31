@@ -16,9 +16,22 @@ git submodule update --init --recursive --depth 1 fixtures/nestjs-nest
 
 cd fixtures/nestjs-nest
 echo "==> installing nestjs/nest deps (legacy peer deps required)"
-npm ci --legacy-peer-deps --no-audit --no-fund
+# Upstream master's package-lock.json regularly lags its package.json, which
+# makes `npm ci` bail with EUSAGE. Fall back to a plain install in that case.
+npm ci --legacy-peer-deps --no-audit --no-fund \
+  || npm install --legacy-peer-deps --no-audit --no-fund
 echo "==> building nestjs packages"
 npm run build
+
+# nest v12 turned the monorepo into npm workspaces, so `node_modules/@nestjs/*`
+# are now symlinks back into `packages/*`, where the .ts sources sit next to the
+# build output. Our tsconfig `paths` redirect then resolves `@nestjs/common` to
+# `index.ts` instead of `index.d.ts` and tsc trips on upstream's type-only
+# re-exports under `isolatedModules`. Drop the links and re-run upstream's own
+# copy task so node_modules/@nestjs/* holds only .js/.d.ts/package.json again.
+echo "==> replacing workspace symlinks with built output"
+find node_modules/@nestjs -maxdepth 1 -type l -delete
+npm run move:node_modules
 
 # Strip the per-integration `paths` blocks from the working copy so Bun
 # doesn't redirect `@nestjs/*` imports back to the upstream TypeScript

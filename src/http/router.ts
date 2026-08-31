@@ -196,6 +196,33 @@ export function bunRoutesLoseParams(path: string): boolean {
 const NAMED_WILDCARD_ANYWHERE = /(^|\/)\{?\*[A-Za-z0-9_$]+\}?(\/|$)/;
 const BARE_PARAM = /^:[A-Za-z0-9_$]+$/;
 
+/**
+ * The verbs `Bun.serve({ routes })` accepts as method keys on a route object.
+ * Anything else — SEARCH, the new-in-Nest-12 QUERY, and the WebDAV verbs —
+ * makes Bun throw `ERR_INVALID_ARG_TYPE` out of `Bun.serve()` itself, which
+ * takes the whole app down at `listen()` rather than 404ing one route.
+ *
+ * Bun falls through to the `fetch` callback for any method a route object
+ * doesn't list, so dropping just the offending key keeps the path (and its
+ * standard verbs) on the native map while the odd verb is served by the manual
+ * dispatcher, which matches on the raw method string. `ALL` is deliberately
+ * absent: `buildBunRoutes()` collapses it into a bare function route, which
+ * Bun invokes for every method.
+ */
+const BUN_NATIVE_METHODS = new Set([
+  'GET',
+  'POST',
+  'PUT',
+  'DELETE',
+  'PATCH',
+  'HEAD',
+  'OPTIONS',
+]);
+
+export function isBunNativeMethod(method: string): boolean {
+  return BUN_NATIVE_METHODS.has(method);
+}
+
 export function toBunRoutePath(path: string): string {
   // Bun.serve route syntax accepts `:param` and `*` directly. Normalise empty
   // path to `/` and strip trailing slash for consistency.

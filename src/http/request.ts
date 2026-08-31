@@ -32,12 +32,26 @@ export function parseQuery(search: string): Record<string, string | string[]> {
   return out;
 }
 
-// SseStream pokes these on `req.socket`; nothing to do under Bun.
-export const NOOP_SOCKET = Object.freeze({
-  setKeepAlive: () => {},
-  setNoDelay: () => {},
-  setTimeout: () => {},
-});
+/**
+ * `req.socket` stand-in. There is no Node socket under Bun, but two bits of
+ * Nest core reach for one: `SseStream.commitHeaders()` pokes
+ * `setKeepAlive`/`setNoDelay`, and since Nest 12
+ * `RouterResponseController.sse()` picks `request.socket ?? response` as its
+ * disconnect source and subscribes with `.once('close', …)`. So the socket has
+ * to share the request's emitter rather than be a frozen no-op singleton.
+ */
+export function makeNoopSocket(emitter: EventEmitter) {
+  return {
+    setKeepAlive: () => {},
+    setNoDelay: () => {},
+    setTimeout: () => {},
+    on: emitter.on.bind(emitter),
+    once: emitter.once.bind(emitter),
+    off: emitter.off.bind(emitter),
+    removeListener: emitter.off.bind(emitter),
+    emit: emitter.emit.bind(emitter),
+  };
+}
 
 /** Adapter state the request builders need — passed by value, no class coupling. */
 export interface RequestShimContext {
@@ -251,9 +265,9 @@ function createRequestShim(
     off: reqEmitter.off.bind(reqEmitter),
     removeListener: reqEmitter.off.bind(reqEmitter),
     emit: reqEmitter.emit.bind(reqEmitter),
-    // SseStream's commitHeaders touches `req.socket.setKeepAlive/setNoDelay`
-    // — provide a no-op socket so it doesn't crash.
-    socket: NOOP_SOCKET,
+    // SseStream's commitHeaders touches `req.socket.setKeepAlive/setNoDelay`,
+    // and Nest 12's sse() listens for 'close' on it — see makeNoopSocket().
+    socket: makeNoopSocket(reqEmitter),
   });
   return req;
 }

@@ -4,6 +4,9 @@ cd "$(dirname "$0")/.."
 
 cd fixtures/nestjs-nest
 git fetch origin master
+# `fixtures:install` strips the per-integration tsconfig `paths` blocks in the
+# working tree, so a plain checkout would abort on those local modifications.
+git checkout -- .
 git checkout origin/master
 echo "==> bumped to $(git rev-parse --short HEAD)"
 cd ../..
