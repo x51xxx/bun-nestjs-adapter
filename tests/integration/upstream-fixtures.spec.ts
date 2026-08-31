@@ -359,13 +359,26 @@ const sendFiles = skipIfMissing(
 );
 sendFiles.describe('upstream :: send-files (StreamableFile)', () => {
   let ctx: { app: any; baseUrl: string };
+  let previousCwd: string;
   beforeAll(async () => {
+    // This fixture reads `join(process.cwd(), 'Readme.md')`, which upstream's
+    // own e2e satisfies by running from the nest repo root. We import the
+    // AppModule but keep our own cwd, where the file is `README.md` — so a
+    // case-insensitive filesystem (macOS) resolves it and a case-sensitive one
+    // (Linux, i.e. CI) does not: `readFileSync` threw ENOENT and the buffer
+    // routes 500'd, while `createReadStream` failed after the headers were
+    // already out and left `/file/stream` a 200 with an empty body.
+    previousCwd = process.cwd();
+    process.chdir(join(FIXTURES_ROOT, '..'));
     const { AppModule } = await import(
       join(FIXTURES_ROOT, 'send-files', 'src', 'app.module.ts')
     );
     ctx = await bootApp(AppModule);
   });
-  afterAll(async () => ctx.app.close());
+  afterAll(async () => {
+    await ctx.app.close();
+    process.chdir(previousCwd);
+  });
 
   it('GET /file/stream streams a file via StreamableFile', async () => {
     const res = await fetch(`${ctx.baseUrl}/file/stream`);
