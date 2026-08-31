@@ -1,6 +1,6 @@
 {
   "name": "@trishchuk/bun-nestjs-adapter",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Native Bun.serve adapter for NestJS — HTTP, WebSocket, SSE, streaming, file uploads.",
   "license": "MIT",
   "author": "Taras Trishchuk <taras@trishchuk.com>",
