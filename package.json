@@ -77,7 +77,7 @@
     "@apollo/server": "^5.5.0",
     "@as-integrations/express5": "^1.1.2",
     "@as-integrations/fastify": "^3.1.0",
-    "@biomejs/biome": "^1.9.4",
+    "@biomejs/biome": "^2.5.11",
     "@casl/ability": "^6.8.1",
     "@changesets/cli": "^2.27.10",
     "@commitlint/cli": "^21.0.2",
