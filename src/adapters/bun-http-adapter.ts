@@ -1,7 +1,12 @@
 import { extname, join } from 'path';
 import { Logger, RequestMethod, VersioningOptions } from '@nestjs/common';
-import { VersionValue } from '@nestjs/common/interfaces';
+// Nest 12 added an `exports` map to @nestjs/common where `./*` resolves to
+// `./*.js`, so the bare `@nestjs/common/interfaces` directory import no longer
+// resolves (only `interfaces/index.js` exists on disk). These concrete files
+// resolve on 10, 11 and 12 alike; `VersionValue` can't come off the package
+// root either — it lives in `@nestjs/common/internal`, which 10/11 lack.
 import { NestApplicationOptions } from '@nestjs/common/interfaces/nest-application-options.interface';
+import { VersionValue } from '@nestjs/common/interfaces/version-options.interface';
 import { AbstractHttpAdapter } from '@nestjs/core';
 import { CorsOptions, applyCorsHeaders } from '../http/cors';
 import {

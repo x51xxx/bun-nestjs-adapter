@@ -1,5 +1,10 @@
 import { VERSION_NEUTRAL, VersioningOptions, VersioningType } from '@nestjs/common';
-import { VersionValue } from '@nestjs/common/interfaces';
+// Nest 12 added an `exports` map to @nestjs/common where `./*` resolves to
+// `./*.js`, so the bare `@nestjs/common/interfaces` directory import no
+// longer resolves (only `interfaces/index.js` exists on disk). The concrete
+// file resolves on 10, 11 and 12 alike, and `VersionValue` is not on the
+// package root — it moved to `@nestjs/common/internal`, which 10/11 lack.
+import { VersionValue } from '@nestjs/common/interfaces/version-options.interface';
 import { BunRequest, BunResponse, BunRouteHandler } from './types';
 
 type NextFn = (err?: unknown) => void;
