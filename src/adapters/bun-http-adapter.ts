@@ -61,7 +61,7 @@ interface ServeStaticOptions {
    * Serve this root through Bun's native `{ dir }` route (Bun >= 1.4.0).
    *
    * Off by default because it changes observable behaviour — see
-   * `serveNativeStatic` and `docs/static-assets.md`. What it buys: a static
+   * `serveNativeStatic` and `docs/http.md`. What it buys: a static
    * root no longer forces the whole app onto the manual `fetch` dispatcher,
    * and files come back with `ETag` / `Last-Modified` / conditional 304.
    */
@@ -775,7 +775,16 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
 
       if (this.corsOptions) {
         applyCorsHeaders(req, res, this.corsOptions);
-        if (req.method === 'OPTIONS') {
+        // Only a *preflight* is answered here. The `cors` package gates on
+        // `Access-Control-Request-Method` and calls `next()` otherwise; without
+        // that gate every `OPTIONS` became a 204 the moment CORS was enabled,
+        // so a user's own `@Options()` handler never ran. A plain OPTIONS now
+        // goes through normal dispatch (and 404s if no route owns it, exactly
+        // as it does with CORS switched off).
+        if (
+          req.method === 'OPTIONS' &&
+          req.headers['access-control-request-method'] !== undefined
+        ) {
           res.statusCode = 204;
           return this.end(res);
         }

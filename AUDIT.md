@@ -375,10 +375,10 @@ Second pass over the same three directories. Every finding below marked
 | H1b / H1c | FIXED | fixed (read) | `dispatchNotFound` passes a real `next` |
 | H2 / H3 | FIXED | fixed | one `createRequestShim()`; SSE works on both dispatchers |
 | M1 | FIXED | fixed | `server.requestIP()` + opt-in `setTrustProxy()` |
-| M2 | open | **still open [confirmed]** | see below |
+| M2 | open | **fixed 2026-09-06** | was still open at audit time; see below |
 | M3 / M4 / M5 / M5a | FIXED | fixed | `compilePath` handles `*name` / `{*name}` / `:id?`; `matchesPathPrefix` shared |
 | M6 | open | **unchanged** | post-buffer limit; `formData()` still not memoised |
-| M7 | open | **still open [confirmed]** for *classic* mounts | the native mount decodes correctly (`decodeStaticSuffix`) |
+| M7 | open | **fixed 2026-09-06** | was still open for *classic* mounts; both modes now share `decodeStaticSuffix` |
 | L1 / L3 | FIXED | fixed | |
 | L2 | open | still open | `/x/:a-:b` → one key named `a-:b` on the slow path; the native path correctly drops the route (`bunRoutesLoseParams`) |
 | **L4** | open | **claim is wrong — see correction** | |
@@ -547,7 +547,7 @@ hanging it) and what it does not (the client cannot tell a truncated response
 from a complete one), and points at the in-band workaround. The behaviour itself
 is unchanged and still needs the 1.4.2 re-check.
 
-### M2 — `enableCors()` still swallows user-defined `OPTIONS` routes **[re-confirmed]**
+### M2 — `enableCors()` still swallows user-defined `OPTIONS` routes **[re-confirmed]** · **FIXED**
 
 Unchanged since 2026-07-26. `handle()` (`src/adapters/bun-http-adapter.ts:~730`)
 short-circuits **every** `OPTIONS` to 204 once CORS is on, whether or not the
@@ -561,7 +561,15 @@ OPTIONS /opt  (real preflight)                   → 204 ""
 The `cors` package gates on `access-control-request-method` and otherwise calls
 `next()`. Same one-line fix as before.
 
-### M7 — classic static mounts still never percent-decode the path **[re-confirmed]**
+**Shipped (2026-09-06).** `handle()` now short-circuits only when the request
+carries `access-control-request-method`; everything else falls through to
+routing, so a user `@Options()` handler runs and an unowned path 404s exactly as
+it does with CORS disabled. The CORS headers are still applied to both.
+Note this does **not** close **L12** — `applyCorsHeaders()` still writes
+`access-control-allow-methods` on every response rather than on preflights only.
+The gate now exists to hang that on.
+
+### M7 — classic static mounts still never percent-decode the path **[re-confirmed]** · **FIXED**
 
 The 2026-07-26 fix landed only on the **native** side (`decodeStaticSuffix()`).
 `matchStatic()` → `serveStatic()` still hand the raw, still-encoded suffix to
@@ -576,6 +584,16 @@ So the *same* file is reachable through `{ native: true }` and unreachable
 through the default mount. Decode per segment (reuse `decodeStaticSuffix`) and
 re-check the traversal guard in the same change — the guard currently only
 works *because* nothing is decoded.
+
+**Shipped (2026-09-06).** `serveStatic()` now runs `matched.rawRel` through the
+same `decodeStaticSuffix()` the native mount uses and joins the decoded
+segments, appending `entry.index` for a trailing slash. That one call replaces
+the old `normalize()`/`includes('..')` guard, which is the point: decoding
+without replacing it would have opened `%2e%2e%2f`. The now-dead `relPath` field
+is gone from `StaticMatch`. A rejected path stays `403` on the classic mount
+(`404` on the native one, mirroring Bun). Regression tests in
+`tests/integration/audit-m2-m7.spec.ts` include a naive-decode trap: reverting
+the guard while keeping the decode fails the `%2e%2e%2f` case.
 
 ### M8 — a second static mount on the same prefix is never consulted **[confirmed]**
 
@@ -775,9 +793,9 @@ now shares body chunks.
 |---|---|---|
 | ~~1~~ | ~~**H4** SSE dies at 10 s~~ | **FIXED 2026-09-06** |
 | ~~2~~ | ~~**H5** CORS `origin` callback~~ | **FIXED 2026-09-06** |
-| 3 | **M9 / M2** 400 on bad JSON, preflight gate | both are Express-contract divergences an app will hit early |
-| 4 | **H6** invisible mid-stream failure | correct the comment now; upstream repro on 1.4.2 |
-| 5 | **M7 / M8** classic static decode + mount chaining | same-file reachable in one mode, not the other |
+| 3 | **M9** 400 on bad JSON (~~M2 preflight gate~~) | **M2 FIXED 2026-09-06**; M9 is an Express-contract divergence an app hits early |
+| 4 | **H6** invisible mid-stream failure | comment corrected; upstream repro still owed on 1.4.2 |
+| 5 | **M8** static mount chaining (~~M7 decode~~) | **M7 FIXED 2026-09-06**; M8 still first-match-only |
 | 6 | **L9 / L10 / L11 / L13** | each is a handful of lines |
 | 7 | Part 4 opt-ins (`idleTimeout`, `maxRequestBodySize`, `reusePort`, compression) | feature work, not defects |
 

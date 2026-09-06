@@ -51,6 +51,11 @@ app.enableCors({ origin: 'https://example.com', credentials: true });
 Enabling CORS routes requests through the manual dispatcher (it can't be modelled
 by the native `routes` map), so it disables the fast path.
 
+Only a **preflight** — an `OPTIONS` request carrying `Access-Control-Request-Method`
+— is answered with `204` before dispatch. A plain `OPTIONS` goes through normal
+routing, so your own `@Options()` handler still runs (and, as with CORS off,
+a path no route owns still 404s). The CORS headers are applied either way.
+
 `origin` accepts a string, `true`, a `RegExp`, an array of either, or a function
 in one of two shapes — told apart by how many parameters it declares:
 
@@ -81,6 +86,16 @@ app.useStaticAssets(join(import.meta.dir, 'public'), {
 
 Served with `Bun.file()` (zero-copy where the OS allows). `prefix` and `index`
 are optional. Like CORS, a static mount uses the manual dispatcher.
+
+The URL suffix is percent-decoded one segment at a time before it reaches the
+filesystem, so `/static/my%20file.txt` serves `my file.txt`. The same pass is
+the traversal guard: a segment that decodes to `.`, `..`, nothing at all, or
+that hides a separator (`%2F`, `%5C`) or a `%00` is rejected with `403` rather
+than resolved. Bun resolves plain dot-segments in `Request.url` before the
+adapter is called at all, so `/static/%2e%2e/x` never reaches the mount; the
+guard covers what Bun passes through untouched. Both mount modes decode
+identically; they differ only in the status for a rejected path (`403` classic,
+`404` native, matching Bun's own directory route).
 
 Responses carry a weak `ETag` and `Last-Modified`, and a conditional request
 (`If-None-Match` / `If-Modified-Since`) is answered with `304`. On Bun >= 1.4.0

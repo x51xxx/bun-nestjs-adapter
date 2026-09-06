@@ -1,5 +1,5 @@
 import { promises as fs } from 'fs';
-import { extname, join, normalize, sep } from 'path';
+import { extname, join } from 'path';
 import { toResponseInit } from './response';
 import { matchesPathPrefix } from './router';
 import { BunResponse } from './types';
@@ -33,8 +33,6 @@ export const STATIC_MIME: Record<string, string> = {
 
 export interface StaticMatch {
   entry: StaticEntry;
-  /** Suffix with `entry.index` already appended for a trailing slash. */
-  relPath: string;
   /** Suffix exactly as it appeared in the URL — still percent-encoded. */
   rawRel: string;
 }
@@ -49,9 +47,7 @@ export function matchStatic(
     // `/static-admin/foo`.
     if (prefix && !matchesPathPrefix(pathname, prefix)) continue;
     const rawRel = pathname.slice(prefix.length) || '/';
-    let rel = rawRel;
-    if (rel.endsWith('/')) rel += entry.index;
-    return { entry, relPath: rel, rawRel };
+    return { entry, rawRel };
   }
   return null;
 }
@@ -78,12 +74,27 @@ export async function serveStatic(
   res: BunResponse,
   req?: { headers: Record<string, unknown> },
 ): Promise<boolean> {
-  const safe = normalize(matched.relPath).replace(/^[/\\]+/, '');
-  if (safe.includes('..' + sep) || safe === '..') {
+  // Percent-decode before the path touches the filesystem — a file named
+  // "my file.txt" arrives as "my%20file.txt", and without this every asset with
+  // a space or a non-ASCII character in its name was unreachable through a
+  // classic mount while the native one served it fine.
+  //
+  // `decodeStaticSuffix` is the same per-segment decode the native route uses,
+  // and it doubles as the traversal guard: it rejects `.`, `..`, an empty
+  // segment, and any escape (`%2F`, `%00`, `\`) that would let the decoded path
+  // address a file outside the root. That check has to live *with* the decode —
+  // the old `normalize()`-based guard was only sound because nothing was
+  // decoded, so decoding without replacing it would have opened `%2e%2e%2f`.
+  const segments = decodeStaticSuffix(matched.rawRel);
+  if (segments === null) {
     finishEmpty(res, 403);
     return true;
   }
-  const filePath = join(matched.entry.root, safe);
+  // A trailing slash (including the bare prefix, which `matchStatic` reports as
+  // `/`) asks for the directory's index file.
+  if (matched.rawRel.endsWith('/')) segments.push(matched.entry.index);
+
+  const filePath = join(matched.entry.root, ...segments);
   try {
     const stat = await fs.stat(filePath);
     if (stat.isDirectory()) {
@@ -143,6 +154,11 @@ export async function serveStatic(
 // 404, weak `ETag` + `Last-Modified` + conditional 304, `301` to the
 // trailing-slash form for a directory, `index.html` inside it, 404 for a miss
 // (no fallthrough to route dispatch), and no method gate.
+//
+// `decodeStaticSuffix()` below is no longer native-only: the classic mount runs
+// the same decode-and-reject pass. The two modes differ only in the status for
+// a rejected path — 403 classic (its long-standing contract), 404 native
+// (Bun's) — and in what a *miss* means: fallthrough to routes vs a hard 404.
 
 /** `/` → `/*`, `/static` → `/static/*` — the only shape Bun's `dir` accepts. */
 export function bunDirRoutePath(prefix: string): string {
