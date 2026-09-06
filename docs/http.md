@@ -28,11 +28,26 @@ parser — no intermediate `Buffer`/string — unless you opt into the raw body.
 - `multipart/*` → left untouched for upload interceptors to read via
   `req.bunRequest.formData()` (see [File uploads](./file-uploads.md))
 
-A body that claims `application/json` and doesn't parse is answered with **400
-Bad Request** before the handler runs — the same thing `body-parser` does on
-platform-express — rather than handing the handler `undefined` and surfacing as
-a confusing validation error later. Only JSON is policed this way; a `text/*`
-body is whatever bytes arrived.
+JSON is held to `body-parser`'s contract, so a payload behaves the same here as
+on platform-express:
+
+| body (with `content-type: application/json`) | `req.body` |
+| --- | --- |
+| `{"a":1}`, `[1,2]` | the parsed value |
+| empty, or no body at all | `{}` |
+| `{oops` | **400 Bad Request** |
+| `null`, `123`, `"str"`, `true`, whitespace only | **400 Bad Request** |
+
+Two rules are doing the work. A payload that doesn't parse is rejected before
+the handler runs, rather than handed over as `undefined` and surfacing as a
+confusing validation error later. And, like `body-parser`'s default
+`strict: true`, only an object or an array is a valid *top-level* JSON body — a
+bare scalar parses but is not accepted. An empty payload is the exception in the
+other direction: it is `{}`, not "no body", because sending one is such a common
+client-side mistake.
+
+Only JSON is policed this way; a `text/*` body is whatever bytes arrived. Turn
+all of it off with `{ bodyParser: false }`.
 
 **Raw body:** create the app with `{ rawBody: true }` to also get `req.rawBody`
 (a `Buffer`) — useful for webhook signature verification. `req.rawBody` is

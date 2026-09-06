@@ -122,6 +122,35 @@ function asSyntaxError(err: unknown): Error {
   return err instanceof Error ? err : new SyntaxError(String(err));
 }
 
+/** `body-parser`'s default `type: 'application/json'`, charset params included. */
+function isJsonContentType(contentType: string): boolean {
+  return contentType.includes('application/json');
+}
+
+/**
+ * `body-parser` runs with `strict: true` by default: only an object or an array
+ * is a valid top-level JSON body, so `null`, `123`, `true` and `"str"` are 400s
+ * even though they parse. It decides on the payload's first non-whitespace
+ * character; deciding on the parsed *value* instead accepts and rejects exactly
+ * the same set, and works on the fast path where we never materialise the text.
+ */
+function violatesStrictJson(value: unknown): boolean {
+  return typeof value !== 'object' || value === null;
+}
+
+function strictJsonError(): Error {
+  return new SyntaxError('Expected an object or array at the top level of the JSON body');
+}
+
+/**
+ * An empty payload on a JSON route is `{}`, not "no body" — `body-parser`
+ * special-cases it because sending one is such a common client-side mistake.
+ * Freshly built every time: a handler may write to `req.body`.
+ */
+function emptyJsonBody(): ParsedBody {
+  return { body: {} };
+}
+
 interface BodySource {
   json(): Promise<unknown>;
   arrayBuffer(): Promise<ArrayBuffer>;
@@ -141,10 +170,21 @@ export async function parseRequestBody(
   raw: BodySource,
   contentType: string,
   rawBodyEnabled: boolean,
+  contentLength?: string,
 ): Promise<ParsedBody> {
-  if (!rawBodyEnabled && contentType.includes('application/json')) {
+  const isJson = isJsonContentType(contentType);
+  // The fast path skips the Buffer and the JS string entirely, but it also
+  // can't tell an empty payload from a malformed one once the stream is
+  // consumed — and those two have different answers (`{}` vs 400). A declared,
+  // non-zero `Content-Length` rules the empty case out; without one (a chunked
+  // upload) we take the buffered path, which sees the bytes and can.
+  if (!rawBodyEnabled && isJson && contentLength !== undefined && contentLength !== '0') {
     try {
-      return { body: await raw.json() };
+      const body = await raw.json();
+      if (violatesStrictJson(body)) {
+        return { body: undefined, error: strictJsonError() };
+      }
+      return { body };
     } catch (err) {
       return { body: undefined, error: asSyntaxError(err) };
     }
@@ -154,11 +194,16 @@ export async function parseRequestBody(
     // An empty-but-present body must still materialise `rawBody` in rawBody
     // mode — signature/webhook verification expects an empty Buffer over a
     // missing one.
-    return rawBodyEnabled ? { body: undefined, rawBody: buf } : NO_BODY;
+    const empty = isJson ? emptyJsonBody() : NO_BODY;
+    return rawBodyEnabled ? { body: empty.body, rawBody: buf } : empty;
   }
-  if (contentType.includes('application/json')) {
+  if (isJson) {
     try {
-      return { body: JSON.parse(buf.toString('utf8')), rawBody: buf };
+      const body = JSON.parse(buf.toString('utf8'));
+      if (violatesStrictJson(body)) {
+        return { body: undefined, rawBody: buf, error: strictJsonError() };
+      }
+      return { body, rawBody: buf };
     } catch (err) {
       // `rawBody` still goes through — a webhook verifier wants the bytes even
       // when they don't parse.
@@ -178,26 +223,45 @@ export async function parseRequestBody(
 }
 
 /**
- * Parse the body into `req.body` / `req.rawBody` when relevant. Skipped for
- * GET/HEAD, empty payloads (content-length: 0, unless rawBody is enabled) and
- * multipart (left for interceptors to read via `req.bunRequest.formData()`).
- * Mutates in place —
- * Nest's route-params factory reads the fields synchronously after this
- * resolves.
+ * Decide whether this request has a body worth parsing, and parse it. The one
+ * gate both dispatch paths go through — they used to carry their own copies of
+ * these conditions, which is precisely how the request shims drifted apart in
+ * the first place (see H3 in AUDIT.md).
+ *
+ * Skipped for GET/HEAD, for multipart (left for interceptors to read via
+ * `req.bunRequest.formData()`), and for an empty non-JSON payload. An empty
+ * *JSON* payload is not skipped: it resolves to `{}`.
+ */
+export async function resolveRequestBody(
+  raw: Request,
+  method: string,
+  headers: Record<string, string>,
+  ctx: RequestShimContext,
+): Promise<ParsedBody> {
+  if (!ctx.bodyParserEnabled) return NO_BODY;
+  if (method === 'GET' || method === 'HEAD') return NO_BODY;
+  const ctype = headers['content-type'] ?? '';
+  if (ctype.startsWith('multipart/')) return NO_BODY;
+  const isJson = isJsonContentType(ctype);
+  const len = headers['content-length'];
+  // No body at all — but a JSON route still gets `{}`, the way body-parser
+  // hands one back for a request that declared the type and sent nothing.
+  if (!raw.body) return isJson ? emptyJsonBody() : NO_BODY;
+  if (!ctx.rawBodyEnabled && !isJson && len === '0') return NO_BODY;
+  return parseRequestBody(raw, ctype, ctx.rawBodyEnabled, len);
+}
+
+/**
+ * Parse the body into `req.body` / `req.rawBody` / `req.bodyParseError`.
+ * Mutates in place — Nest's route-params factory reads the fields
+ * synchronously after this resolves.
  */
 export async function maybeParseBody(
   req: BunRequest,
   raw: Request,
   ctx: RequestShimContext,
 ): Promise<void> {
-  if (!ctx.bodyParserEnabled) return;
-  const m = req.method;
-  if (m === 'GET' || m === 'HEAD') return;
-  if (!raw.body) return;
-  if (!ctx.rawBodyEnabled && req.headers['content-length'] === '0') return;
-  const ctype = req.headers['content-type'] ?? '';
-  if (ctype.startsWith('multipart/')) return;
-  const parsed = await parseRequestBody(raw, ctype, ctx.rawBodyEnabled);
+  const parsed = await resolveRequestBody(raw, req.method, req.headers, ctx);
   if (parsed.body !== undefined) req.body = parsed.body;
   if (parsed.rawBody !== undefined) req.rawBody = parsed.rawBody;
   if (parsed.error !== undefined) req.bodyParseError = parsed.error;
@@ -346,25 +410,12 @@ export async function buildFetchRequest(
   const query =
     queryStart === -1 ? EMPTY_QUERY : parseQuery(rawUrl.slice(queryStart + 1));
 
-  let body: unknown = undefined;
-  let rawBody: Buffer | undefined;
-  let bodyParseError: Error | undefined;
-  const ctype = headers['content-type'] ?? '';
-  // Skip multipart consumption — BunFileInterceptor will read formData()
-  // off the original Web Request itself. Mirrors maybeParseBody() in the
-  // routes hot path so behaviour is identical regardless of dispatcher.
-  if (
-    ctx.bodyParserEnabled &&
-    method !== 'GET' &&
-    method !== 'HEAD' &&
-    raw.body &&
-    !ctype.startsWith('multipart/')
-  ) {
-    const parsed = await parseRequestBody(raw, ctype, ctx.rawBodyEnabled);
-    body = parsed.body;
-    rawBody = parsed.rawBody;
-    bodyParseError = parsed.error;
-  }
+  // Same gate as the native-routes hot path — one function, so the two
+  // dispatchers cannot disagree about what counts as a body.
+  const parsed = await resolveRequestBody(raw, method, headers, ctx);
+  const body = parsed.body;
+  const rawBody = parsed.rawBody;
+  const bodyParseError = parsed.error;
 
   const req = createRequestShim(
     raw,

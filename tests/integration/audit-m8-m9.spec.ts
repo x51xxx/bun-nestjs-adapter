@@ -15,6 +15,13 @@ import { BunHttpAdapter } from '../../src';
 //   M9 — a malformed JSON body was swallowed and the handler got `undefined`.
 //        `body-parser` answers 400; measured against platform-express, Nest
 //        renders `{"message":…,"error":"Bad Request","statusCode":400}`.
+//   N1 — an empty JSON payload resolved to `undefined` where `body-parser`
+//        hands back `{}`.
+//   N2 — a bare JSON scalar (`null`, `123`, `"str"`, `true`) was accepted where
+//        `body-parser`'s default `strict: true` rejects it with 400.
+//
+// The N1/N2 table below was read off @nestjs/platform-express case by case
+// before it was written here; both dispatchers now reproduce all of it.
 //
 // Everything runs through both dispatchers: the `middleware` variant registers
 // a pass-through `use()` handler, which is all it takes to leave the native
@@ -225,5 +232,116 @@ describe('M9 — a malformed JSON body is rejected with 400', () => {
     const base = `http://127.0.0.1:${created.getHttpServer().address().port}`;
     const res = await fetch(`${base}/json`, postJson('{oops'));
     expect(res.status).toBe(400);
+  });
+});
+
+// ── N1 / N2 ─────────────────────────────────────────────────────────────────
+
+@Controller()
+class StrictBodyController {
+  @Post('json')
+  json(@Body() body: unknown) {
+    return { body, t: typeof body, isArr: Array.isArray(body) };
+  }
+
+  // Writes to the parsed body, so a shared `{}` between requests would show up
+  // on the next one.
+  @Post('mutate')
+  mutate(@Body() body: Record<string, unknown>) {
+    const seen = { ...body };
+    body.touched = true;
+    return { seen };
+  }
+}
+
+@Module({ controllers: [StrictBodyController] })
+class StrictBodyModule {}
+
+const chunked = (chunk?: string) =>
+  ({
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: new ReadableStream({
+      start(c) {
+        if (chunk !== undefined) c.enqueue(new TextEncoder().encode(chunk));
+        c.close();
+      },
+    }),
+    duplex: 'half',
+  }) as RequestInit;
+
+describe('N1 / N2 — empty and non-object JSON bodies match body-parser', () => {
+  for (const [label, withMiddleware] of DISPATCHERS) {
+    const configure = withMiddleware ? passthrough : undefined;
+    const post = async (init: RequestInit) => {
+      const base = await boot(StrictBodyModule, configure);
+      const res = await fetch(`${base}/json`, init);
+      return { status: res.status, json: await res.json() };
+    };
+
+    // N1 — empty is `{}`, in every shape an empty payload arrives in.
+    it(`N1 empty string body is {} — ${label}`, async () => {
+      const r = await post(postJson(''));
+      expect(r.status).toBe(201);
+      expect(r.json).toEqual({ body: {}, t: 'object', isArr: false });
+    });
+
+    it(`N1 no body with a JSON content type is {} — ${label}`, async () => {
+      const r = await post({
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+      });
+      expect(r.status).toBe(201);
+      expect((r.json as { body: unknown }).body).toEqual({});
+    });
+
+    it(`N1 an empty chunked body is {} — ${label}`, async () => {
+      // No `Content-Length`, so this takes the buffered path — the one place
+      // an empty payload can still be told apart from a malformed one.
+      const r = await post(chunked());
+      expect(r.status).toBe(201);
+      expect((r.json as { body: unknown }).body).toEqual({});
+    });
+
+    it(`N1 a chunked object still parses — ${label}`, async () => {
+      const r = await post(chunked('{"a":1}'));
+      expect(r.status).toBe(201);
+      expect((r.json as { body: unknown }).body).toEqual({ a: 1 });
+    });
+
+    it(`N1 leaves a body-less request without a content type alone — ${label}`, async () => {
+      const r = await post({ method: 'POST' });
+      expect(r.status).toBe(201);
+      expect((r.json as { t: string }).t).toBe('undefined');
+    });
+
+    // N2 — strict mode: only an object or an array at the top level.
+    for (const payload of ['null', '123', '"str"', 'true', '   ']) {
+      it(`N2 rejects ${JSON.stringify(payload)} with 400 — ${label}`, async () => {
+        const r = await post(postJson(payload));
+        expect(r.status).toBe(400);
+        expect(r.json).toMatchObject({ statusCode: 400, error: 'Bad Request' });
+      });
+    }
+
+    it(`N2 accepts a top-level array — ${label}`, async () => {
+      const r = await post(postJson('[1,2]'));
+      expect(r.status).toBe(201);
+      expect(r.json).toEqual({ body: [1, 2], t: 'object', isArr: true });
+    });
+
+    it(`N2 accepts an object behind leading whitespace — ${label}`, async () => {
+      const r = await post(postJson('  {"a":1}'));
+      expect(r.status).toBe(201);
+      expect((r.json as { body: unknown }).body).toEqual({ a: 1 });
+    });
+  }
+
+  it('hands every empty request its own object, not a shared one', async () => {
+    const base = await boot(StrictBodyModule);
+    const first = await fetch(`${base}/mutate`, postJson(''));
+    expect(await first.json()).toEqual({ seen: {} });
+    const second = await fetch(`${base}/mutate`, postJson(''));
+    expect(await second.json()).toEqual({ seen: {} });
   });
 });

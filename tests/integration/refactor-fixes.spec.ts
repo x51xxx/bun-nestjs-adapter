@@ -111,7 +111,10 @@ describe('fallback dispatcher rawBody', () => {
       cookieSecret: null,
     });
 
-    expect(req.body).toBeUndefined();
+    // `{}` rather than undefined: an empty payload on a JSON route is what
+    // body-parser calls an empty object, and rawBody mode still materialises
+    // the zero-length Buffer a webhook verifier expects.
+    expect(req.body).toEqual({});
     expect(Buffer.isBuffer(req.rawBody)).toBe(true);
     expect(req.rawBody?.length).toBe(0);
   });
@@ -159,7 +162,7 @@ describe('parseRequestBody — empty-but-present body', () => {
 
   it('materialises an empty Buffer as rawBody in rawBody mode', async () => {
     const parsed = await parseRequestBody(emptySource(), 'application/json', true);
-    expect(parsed.body).toBeUndefined();
+    expect(parsed.body).toEqual({});
     expect(Buffer.isBuffer(parsed.rawBody)).toBe(true);
     expect(parsed.rawBody?.length).toBe(0);
   });

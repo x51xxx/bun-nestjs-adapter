@@ -674,7 +674,7 @@ The three error-routing sites (`dispatchRoutes`, `runRouteChain`, and this one)
 now share a `dispatchError()` helper instead of repeating the
 errorHandler-or-`_reject` block.
 
-### N1 — an empty JSON body yields `undefined`, not `{}` **[confirmed]**
+### N1 — an empty JSON body yields `undefined`, not `{}` **[confirmed]** · **FIXED**
 
 Found while measuring M9 against platform-express, not part of it. `body-parser`
 hands the handler an empty object for a present-but-empty payload; the adapter
@@ -688,11 +688,15 @@ bun adapter      → 201 {"t":"undefined"}
 ```
 
 Matters for a `ValidationPipe` on a DTO with all-optional fields: `{}` validates,
-`undefined` does not. Left alone deliberately — flipping it changes what every
-existing handler sees for an empty payload, which is a decision for the package
-owner rather than a bug fix.
+`undefined` does not.
 
-### N2 — a bare JSON scalar is accepted where `body-parser` rejects it **[confirmed]**
+**Shipped (2026-09-06).** An empty JSON payload resolves to a **fresh** `{}` —
+fresh because a handler may write to `req.body`, and a shared object would leak
+between requests (there is a test for exactly that). It covers all three shapes
+an empty payload arrives in: `Content-Length: 0`, no body at all, and a chunked
+stream that closes immediately.
+
+### N2 — a bare JSON scalar is accepted where `body-parser` rejects it **[confirmed]** · **FIXED**
 
 Also found while measuring M9. `body-parser` defaults to `strict: true`, which
 only accepts an object or an array at the top level:
@@ -704,7 +708,26 @@ bun adapter      → 201 {"body":"just a string","t":"string"}
 ```
 
 Same call as N1: strictly a parity gap, but tightening it would start rejecting
-payloads that work today. Both are cheap to add behind an option if wanted.
+payloads that work today.
+
+**Shipped (2026-09-06).** `body-parser` decides on the payload's first
+non-whitespace character; the adapter decides on the *parsed value* instead
+(`typeof value !== 'object' || value === null`), which accepts and rejects
+exactly the same set for anything that parses, and — unlike a first-char check —
+works on the JSON fast path, where the text is never materialised.
+
+**The fast path needed one adjustment to get here.** `Request.json()` cannot
+tell an empty payload from a malformed one once the stream is consumed, and
+those two now have different answers (`{}` vs 400). So the fast path is taken
+only when a declared, non-zero `Content-Length` has already ruled the empty case
+out; a chunked JSON upload takes the buffered path, which sees the bytes and can
+tell. All eleven reference cases — empty, no body, no content type, whitespace,
+`null`, `123`, `"str"`, `true`, `[1,2]`, leading whitespace, chunked — now match
+platform-express on both dispatchers. Only the error prose differs.
+
+**One `.replace()` of collateral value:** both builders now share a single
+`resolveRequestBody()` gate instead of carrying their own copies of the
+"is there a body worth parsing" conditions — the drift that produced H3.
 
 ### L9 — `enableCors()` after `listen()` is a silent no-op **[confirmed]**
 
