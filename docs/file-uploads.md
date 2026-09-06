@@ -6,9 +6,16 @@ surface and populate `req.file` / `req.files`.
 
 | Interceptor | Sets | Signature |
 | --- | --- | --- |
-| `BunFileInterceptor(field, options?)` | `req.file` | single file from one field |
-| `BunFilesInterceptor(field, maxCount?, options?)` | `req.files` | files from one field; more than `maxCount` is a 400 |
+| `BunFileInterceptor(field, options?)` | `req.file` | one file, from that field only |
+| `BunFilesInterceptor(field, maxCount?, options?)` | `req.files` | files from that field only, at most `maxCount` |
 | `BunAnyFilesInterceptor(options?)` | `req.files` | every file across all fields |
+
+Each interceptor declares which file parts it accepts, and answers
+`400 Unexpected field - <name>` for anything outside that — a file under a field
+it wasn't asked for, or one file too many under a field it was. Text fields are
+never policed by name, and a request carrying no file at all is fine. This
+mirrors Multer; ignoring the extra part, as these used to, let a client upload
+under the wrong field name, get a `201`, and never learn the file was dropped.
 
 ## The uploaded file shape
 
@@ -88,11 +95,15 @@ carrying the same message `@nestjs/platform-express` produces:
   exceeds `totalSize`, or a file exceeds `limits.fileSize`.
 - **`BadRequestException`** (HTTP 400) — `Too many files`: more files than
   `limits.files`.
-- **`BadRequestException`** (HTTP 400) — `Unexpected field - <field>`: more
-  files in one field than `maxCount`.
+- **`BadRequestException`** (HTTP 400) — `Unexpected field - <field>`: a file
+  under a field the interceptor doesn't accept, or more files in one field than
+  it accepts (`maxCount`, or one for `BunFileInterceptor`).
 
 Several interceptors can share one route — the parsed form is memoised on the
-request, so the second one does not hit `Body already used`.
+request, so the second one does not hit `Body already used`. They do have to
+agree about the form: a single-field interceptor rejects a file under any other
+name, so pair one with `BunAnyFilesInterceptor()` rather than with a second
+single-field interceptor.
 
 ## Multiple files
 

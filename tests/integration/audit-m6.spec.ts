@@ -10,6 +10,7 @@ import {
 import { NestFactory } from '@nestjs/core';
 import { BunHttpAdapter } from '../../src';
 import {
+  BunAnyFilesInterceptor,
   BunFileInterceptor,
   BunFilesInterceptor,
   type BunUploadedFile,
@@ -86,10 +87,13 @@ class UploadController {
   }
 
   // Two interceptors on one route: the second used to hit `Body already used`.
+  // They have to *agree* about the form — a single-field interceptor rejects a
+  // file under any other name (see N3) — so this pairs the accept-everything
+  // one with a single-field one over a form carrying only that field.
   @Post('two')
-  @UseInterceptors(BunFileInterceptor('f'), BunFilesInterceptor('g'))
-  two(@UploadedFile() f?: BunUploadedFile, @UploadedFiles() gs?: BunUploadedFile[]) {
-    return { f: f?.originalname ?? null, g: gs?.map(x => x.originalname) ?? [] };
+  @UseInterceptors(BunAnyFilesInterceptor(), BunFileInterceptor('f'))
+  two(@UploadedFile() f?: BunUploadedFile, @UploadedFiles() all?: BunUploadedFile[]) {
+    return { f: f?.originalname ?? null, all: all?.map(x => x.originalname) ?? [] };
   }
 }
 
@@ -213,16 +217,10 @@ describe('M6 — upload limits', () => {
 
   it('runs two interceptors on one route off a single parse', async () => {
     const base = await boot(UploadModule);
-    const res = await post(
-      `${base}/u/two`,
-      form([
-        ['f', 'one'],
-        ['g', 'two'],
-      ]),
-    );
+    const res = await post(`${base}/u/two`, form([['f', 'one']]));
     // Previously: the second interceptor hit `Body already used`, because a Web
-    // Request body can only be read once.
+    // Request body can only be read once. Both ran here, off one parse.
     expect(res.status).toBe(201);
-    expect(await res.json()).toEqual({ f: 'f.txt', g: ['g.txt'] });
+    expect(await res.json()).toEqual({ f: 'f.txt', all: ['f.txt'] });
   });
 });

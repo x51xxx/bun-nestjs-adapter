@@ -123,17 +123,31 @@ async function fileFromFormDataEntry(
 }
 
 /**
+ * Which file parts an interceptor is willing to accept. Multer models this as a
+ * `fields` spec and answers `LIMIT_UNEXPECTED_FILE` for anything outside it —
+ * a file under a field it wasn't asked for, or one file too many under a field
+ * it was. Both come back as `400 Unexpected field - <name>`; text fields are
+ * never policed by name.
+ */
+interface FieldPolicy {
+  /** `null` accepts every field name — `BunAnyFilesInterceptor`. */
+  field: string | null;
+  /** Files accepted under that field. `Infinity` for "as many as arrive". */
+  maxCount: number;
+}
+
+/**
  * Whole-request ceiling to enforce before reading the body: `totalSize` when
  * given, otherwise derived from `fileSize` and the known file count. `Infinity`
  * (explicit, or "nothing to derive from") means no pre-check.
  */
 function totalSizeLimit(
   limits: BunMultipartOptions['limits'],
-  maxFiles: number | undefined,
+  policy: FieldPolicy,
 ): number {
   if (limits?.totalSize !== undefined) return limits.totalSize;
   if (limits?.fileSize === undefined) return Number.POSITIVE_INFINITY;
-  const count = limits.files ?? maxFiles;
+  const count = Number.isFinite(policy.maxCount) ? policy.maxCount : limits.files;
   if (count === undefined) return Number.POSITIVE_INFINITY;
   return limits.fileSize * count + DERIVED_TOTAL_SIZE_SLACK;
 }
@@ -156,8 +170,8 @@ function assertWithinTotalSize(source: Request, limit: number): void {
 
 async function readFormData(
   req: MultipartRequest,
+  policy: FieldPolicy,
   options?: BunMultipartOptions,
-  maxFiles?: number,
 ): Promise<{
   fields: Record<string, string>;
   filesByField: Map<string, BunUploadedFile[]>;
@@ -169,7 +183,7 @@ async function readFormData(
     );
   }
   const limits = options?.limits;
-  assertWithinTotalSize(source, totalSizeLimit(limits, maxFiles));
+  assertWithinTotalSize(source, totalSizeLimit(limits, policy));
 
   // Memoised: a second interceptor on the same route would otherwise get
   // `Body already used` off the already-consumed Web Request.
@@ -178,10 +192,21 @@ async function readFormData(
   const filesByField = new Map<string, BunUploadedFile[]>();
   let totalFiles = 0;
 
+  // Form order, so the *first* offending part is the one reported — which is
+  // what Multer's stream-order check reports too.
   for (const [key, value] of fd.entries()) {
     if (typeof value === 'string') {
       fields[key] = value;
     } else if (isFileEntry(value)) {
+      // Is this part acceptable at all? Checked before the global count,
+      // because it is about this part rather than the request as a whole.
+      const accepted = filesByField.get(key);
+      if (
+        (policy.field !== null && key !== policy.field) ||
+        (accepted?.length ?? 0) >= policy.maxCount
+      ) {
+        throw new BadRequestException(MULTER_MESSAGES.unexpectedField(key));
+      }
       totalFiles++;
       if (limits?.files !== undefined && totalFiles > limits.files) {
         throw new BadRequestException(MULTER_MESSAGES.fileCount);
@@ -190,8 +215,7 @@ async function readFormData(
       if (limits?.fileSize !== undefined && file.size > limits.fileSize) {
         throw new PayloadTooLargeException(MULTER_MESSAGES.fileSize);
       }
-      const arr = filesByField.get(key);
-      if (arr) arr.push(file);
+      if (accepted) accepted.push(file);
       else filesByField.set(key, [file]);
     }
   }
@@ -204,6 +228,11 @@ async function readFormData(
  * Single-file upload interceptor. Mirrors `FileInterceptor()` from
  * `@nestjs/platform-express` but reads the multipart body via
  * `Bun.serve`'s native `Request.formData()`.
+ *
+ * Exactly one file, under exactly this field: a file under any other name, or a
+ * second one under this one, is a `400 Unexpected field - <name>`. Text fields
+ * are not policed by name. A request with no file at all is fine —
+ * `req.file` is simply `undefined`.
  *
  * Usage:
  *   ```ts
@@ -220,11 +249,10 @@ export function BunFileInterceptor(
   class MixinInterceptor implements NestInterceptor {
     intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
       const req = context.switchToHttp().getRequest<MultipartRequest>();
-      return from(readFormData(req, options, 1)).pipe(
+      return from(readFormData(req, { field: fieldName, maxCount: 1 }, options)).pipe(
         switchMap(({ fields, filesByField }) => {
           req.body = { ...(req.body ?? {}), ...fields };
-          const found = filesByField.get(fieldName);
-          req.file = found?.[0];
+          req.file = filesByField.get(fieldName)?.[0];
           return next.handle();
         }),
       );
@@ -236,9 +264,9 @@ export function BunFileInterceptor(
 /**
  * @publicApi
  *
- * Multi-file upload interceptor. Sets `req.files` to the array of files
- * uploaded under `fieldName`. Exceeding the optional `maxCount` is a
- * `400 Unexpected field`, the way Multer answers it.
+ * Multi-file upload interceptor. Sets `req.files` to the files uploaded under
+ * `fieldName`. A file under any other field, or one past the optional
+ * `maxCount`, is a `400 Unexpected field - <name>`, the way Multer answers it.
  */
 export function BunFilesInterceptor(
   fieldName: string,
@@ -249,17 +277,14 @@ export function BunFilesInterceptor(
   class MixinInterceptor implements NestInterceptor {
     intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
       const req = context.switchToHttp().getRequest<MultipartRequest>();
-      return from(readFormData(req, options, maxCount)).pipe(
+      const policy: FieldPolicy = {
+        field: fieldName,
+        maxCount: maxCount ?? Number.POSITIVE_INFINITY,
+      };
+      return from(readFormData(req, policy, options)).pipe(
         switchMap(({ fields, filesByField }) => {
           req.body = { ...(req.body ?? {}), ...fields };
-          const list = filesByField.get(fieldName) ?? [];
-          // Multer answers 400 `Unexpected field` for the file past the limit.
-          // Silently dropping it, as this used to, loses an upload the client
-          // believes succeeded.
-          if (maxCount !== undefined && list.length > maxCount) {
-            throw new BadRequestException(MULTER_MESSAGES.unexpectedField(fieldName));
-          }
-          req.files = list;
+          req.files = filesByField.get(fieldName) ?? [];
           return next.handle();
         }),
       );
@@ -271,8 +296,8 @@ export function BunFilesInterceptor(
 /**
  * @publicApi
  *
- * Reads any number of files across any number of fields. Sets
- * `req.files` to an object keyed by fieldname.
+ * Reads any number of files across any number of fields — the one interceptor
+ * that accepts every field name. Sets `req.files` to the flattened list.
  */
 export function BunAnyFilesInterceptor(
   options?: BunMultipartOptions,
@@ -281,7 +306,8 @@ export function BunAnyFilesInterceptor(
   class MixinInterceptor implements NestInterceptor {
     intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
       const req = context.switchToHttp().getRequest<MultipartRequest>();
-      return from(readFormData(req, options)).pipe(
+      const policy: FieldPolicy = { field: null, maxCount: Number.POSITIVE_INFINITY };
+      return from(readFormData(req, policy, options)).pipe(
         switchMap(({ fields, filesByField }) => {
           req.body = { ...(req.body ?? {}), ...fields };
           const flat: BunUploadedFile[] = [];

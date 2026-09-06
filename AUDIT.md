@@ -754,7 +754,7 @@ platform-express on both dispatchers. Only the error prose differs.
 `resolveRequestBody()` gate instead of carrying their own copies of the
 "is there a body worth parsing" conditions — the drift that produced H3.
 
-### N3 — a file under an unexpected field name is ignored, not rejected **[confirmed]**
+### N3 — a file under an unexpected field name is ignored, not rejected **[confirmed]** · **FIXED**
 
 Found while measuring Multer for M6, not part of it. `FileInterceptor('f')`
 rejects a multipart request that also carries a file under any *other* field;
@@ -767,9 +767,27 @@ bun adapter      → 201, the `g` part silently dropped
 ```
 
 Same `LIMIT_UNEXPECTED_FILE` rule that now backs `maxCount`, just applied to
-field *names* as well as counts. Left alone deliberately: it would start
-rejecting forms that work today, and unlike M6 there is no memory-safety
-argument forcing the change.
+field *names* as well as counts.
+
+**Shipped (2026-09-06).** Both halves of that rule now live in one place. Each
+interceptor passes a `FieldPolicy` — `{ field, maxCount }`, with `field: null`
+for `BunAnyFilesInterceptor` — into `readFormData()`, which walks the parts in
+form order and rejects the first that falls outside it. Form order matters:
+Multer reports the first offending part in *stream* order, and this reproduces
+that. The `maxCount` check moved into the same loop, so it no longer runs after
+the whole form is read.
+
+The full Multer table was measured before any of it was written, and all nine
+rows now match: `single('f')` accepts `f` and only `f`, rejects a second `f`,
+ignores text fields by name, and is fine with no file at all; `array('f', 3)`
+accepts repeats of `f` but not `g`; `any()` accepts everything.
+
+**One test of M6's had to change with it.** "Two interceptors on one route" was
+written as `BunFileInterceptor('f') + BunFilesInterceptor('g')`, which is now a
+400 — as it already was on platform-express, where the same pairing answers
+`Unexpected field - g`. It pairs `BunAnyFilesInterceptor()` with a single-field
+one over a matching form instead, which still exercises the memoisation it was
+written for.
 
 ### L9 — `enableCors()` after `listen()` is a silent no-op **[confirmed]**
 
