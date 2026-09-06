@@ -29,6 +29,13 @@ export interface BunRequest {
    *  application (Nest pipes / DTOs), mirroring Express' `Request['body']`. */
   body: any;
   rawBody?: Buffer;
+  /**
+   * Set when the body parser rejected the payload (malformed JSON). It is
+   * produced before any response object exists, so it travels on the request
+   * and the dispatcher turns it into a 400 — matching `body-parser`, which
+   * `@nestjs/platform-express` answers `entity.parse.failed` with.
+   */
+  bodyParseError?: Error;
   cookies?: Record<string, unknown>;
   signedCookies?: Record<string, unknown>;
   /** Reference to the underlying Web `Request` object. */

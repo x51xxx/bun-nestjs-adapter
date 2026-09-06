@@ -105,9 +105,22 @@ function makeIpGetter(
 export interface ParsedBody {
   body: unknown;
   rawBody?: Buffer;
+  /**
+   * The `SyntaxError` a malformed JSON payload produced. Reported rather than
+   * swallowed: `body-parser` answers 400 for this, and silently handing the
+   * handler `undefined` turned a bad payload into a confusing DTO-validation
+   * failure further down (or, on a route with no validation, into nothing at
+   * all). The dispatcher maps it to the same `BadRequestException`
+   * platform-express ends up with.
+   */
+  error?: Error;
 }
 
 const NO_BODY: ParsedBody = Object.freeze({ body: undefined });
+
+function asSyntaxError(err: unknown): Error {
+  return err instanceof Error ? err : new SyntaxError(String(err));
+}
 
 interface BodySource {
   json(): Promise<unknown>;
@@ -132,8 +145,8 @@ export async function parseRequestBody(
   if (!rawBodyEnabled && contentType.includes('application/json')) {
     try {
       return { body: await raw.json() };
-    } catch {
-      return NO_BODY;
+    } catch (err) {
+      return { body: undefined, error: asSyntaxError(err) };
     }
   }
   const buf = Buffer.from(await raw.arrayBuffer());
@@ -146,8 +159,10 @@ export async function parseRequestBody(
   if (contentType.includes('application/json')) {
     try {
       return { body: JSON.parse(buf.toString('utf8')), rawBody: buf };
-    } catch {
-      return { body: undefined, rawBody: buf };
+    } catch (err) {
+      // `rawBody` still goes through — a webhook verifier wants the bytes even
+      // when they don't parse.
+      return { body: undefined, rawBody: buf, error: asSyntaxError(err) };
     }
   }
   if (contentType.includes('application/x-www-form-urlencoded')) {
@@ -185,6 +200,7 @@ export async function maybeParseBody(
   const parsed = await parseRequestBody(raw, ctype, ctx.rawBodyEnabled);
   if (parsed.body !== undefined) req.body = parsed.body;
   if (parsed.rawBody !== undefined) req.rawBody = parsed.rawBody;
+  if (parsed.error !== undefined) req.bodyParseError = parsed.error;
 }
 
 /** Bun's native-route request: a Web `Request` with `params` filled by the matcher. */
@@ -332,6 +348,7 @@ export async function buildFetchRequest(
 
   let body: unknown = undefined;
   let rawBody: Buffer | undefined;
+  let bodyParseError: Error | undefined;
   const ctype = headers['content-type'] ?? '';
   // Skip multipart consumption — BunFileInterceptor will read formData()
   // off the original Web Request itself. Mirrors maybeParseBody() in the
@@ -346,9 +363,10 @@ export async function buildFetchRequest(
     const parsed = await parseRequestBody(raw, ctype, ctx.rawBodyEnabled);
     body = parsed.body;
     rawBody = parsed.rawBody;
+    bodyParseError = parsed.error;
   }
 
-  return createRequestShim(
+  const req = createRequestShim(
     raw,
     method,
     pathname,
@@ -361,4 +379,6 @@ export async function buildFetchRequest(
     ctx,
     server,
   );
+  if (bodyParseError !== undefined) req.bodyParseError = bodyParseError;
+  return req;
 }

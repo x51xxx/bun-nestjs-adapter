@@ -37,19 +37,27 @@ export interface StaticMatch {
   rawRel: string;
 }
 
+/**
+ * Every mount whose prefix covers this path, in registration order.
+ *
+ * Returning *all* of them is the point: `serve-static` mounts chain through
+ * `next()`, so two roots on the same prefix are tried in turn and the second
+ * answers what the first doesn't have. This used to return the first match
+ * only, which made every later mount on a shared prefix dead weight.
+ */
 export function matchStatic(
   staticAssets: StaticEntry[],
   pathname: string,
-): StaticMatch | null {
+): StaticMatch[] {
+  const out: StaticMatch[] = [];
   for (const entry of staticAssets) {
     const prefix = entry.prefix === '/' ? '' : entry.prefix;
     // `/static` must match `/static`, `/static/`, `/static/foo`, but NOT
     // `/static-admin/foo`.
     if (prefix && !matchesPathPrefix(pathname, prefix)) continue;
-    const rawRel = pathname.slice(prefix.length) || '/';
-    return { entry, rawRel };
+    out.push({ entry, rawRel: pathname.slice(prefix.length) || '/' });
   }
-  return null;
+  return out;
 }
 
 function finishEmpty(res: BunResponse, status: number): void {

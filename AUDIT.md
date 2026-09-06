@@ -616,7 +616,7 @@ is gone from `StaticMatch`. A rejected path stays `403` on the classic mount
 `tests/integration/audit-m2-m7.spec.ts` include a naive-decode trap: reverting
 the guard while keeping the decode fails the `%2e%2e%2f` case.
 
-### M8 — a second static mount on the same prefix is never consulted **[confirmed]**
+### M8 — a second static mount on the same prefix is never consulted **[confirmed]** · **FIXED**
 
 `matchStatic()` (`src/http/static.ts:46-56`) `return`s on the **first** entry
 whose prefix matches. When `serveStatic()` then misses (ENOENT → `false`), the
@@ -632,7 +632,15 @@ GET /s/only-here.txt → 404
 **Fix.** Make `matchStatic` yield every matching entry (or return an array) and
 have `handle()` walk them until one serves.
 
-### M9 — a malformed JSON body is swallowed instead of rejected with 400 **[confirmed]**
+**Shipped (2026-09-06).** `matchStatic()` returns `StaticMatch[]`, and
+`handle()` splits them: classic mounts are walked in registration order by
+`serveStaticChain()` before route dispatch, while the first *native* match is
+carried past dispatch to `finishNoRoute()` as before — the two run at different
+stages, so they can't share one list. Verified against platform-express: first
+mount wins a file both hold, the second answers what the first lacks, and a
+route under the prefix still runs once every mount misses.
+
+### M9 — a malformed JSON body is swallowed instead of rejected with 400 **[confirmed]** · **FIXED**
 
 `parseRequestBody()` (`src/http/request.ts:132-152`) catches the parse error and
 returns `NO_BODY`, so `req.body` stays `undefined`:
@@ -650,6 +658,53 @@ reading `undefined`.
 **Fix.** Record the parse failure on the request and let the adapter settle a
 400, or rethrow as `BadRequestException`. Keep the tolerant behaviour opt-in if
 back-compat matters.
+
+**Shipped (2026-09-06).** `parseRequestBody()` returns the `SyntaxError` instead
+of dropping it; both builders put it on `req.bodyParseError` (it is produced
+before any response exists, so the request is what carries it), and both
+dispatchers wrap it in `BadRequestException` and route it through the handler
+Nest registered with `setErrorHandler()`. The response matches
+platform-express's shape exactly — `{"message":…,"error":"Bad
+Request","statusCode":400}` — only the parser's wording differs, since Bun's
+`Request.json()` says "Failed to parse JSON" where V8 says "JSON Parse error:
+…". `rawBody` is still populated for the failed payload, because a webhook
+verifier wants the bytes either way.
+
+The three error-routing sites (`dispatchRoutes`, `runRouteChain`, and this one)
+now share a `dispatchError()` helper instead of repeating the
+errorHandler-or-`_reject` block.
+
+### N1 — an empty JSON body yields `undefined`, not `{}` **[confirmed]**
+
+Found while measuring M9 against platform-express, not part of it. `body-parser`
+hands the handler an empty object for a present-but-empty payload; the adapter
+skips parsing entirely (`maybeParseBody`, `content-length: 0`) and leaves
+`req.body` undefined.
+
+```
+POST /json  content-type: application/json  body: ""
+platform-express → 201 {"body":{},"t":"object"}
+bun adapter      → 201 {"t":"undefined"}
+```
+
+Matters for a `ValidationPipe` on a DTO with all-optional fields: `{}` validates,
+`undefined` does not. Left alone deliberately — flipping it changes what every
+existing handler sees for an empty payload, which is a decision for the package
+owner rather than a bug fix.
+
+### N2 — a bare JSON scalar is accepted where `body-parser` rejects it **[confirmed]**
+
+Also found while measuring M9. `body-parser` defaults to `strict: true`, which
+only accepts an object or an array at the top level:
+
+```
+POST /json  body: "just a string"
+platform-express → 400 {"message":"JSON Parse error: …","error":"Bad Request","statusCode":400}
+bun adapter      → 201 {"body":"just a string","t":"string"}
+```
+
+Same call as N1: strictly a parity gap, but tightening it would start rejecting
+payloads that work today. Both are cheap to add behind an option if wanted.
 
 ### L9 — `enableCors()` after `listen()` is a silent no-op **[confirmed]**
 
@@ -822,9 +877,9 @@ now shares body chunks.
 |---|---|---|
 | ~~1~~ | ~~**H4** SSE dies at 10 s~~ | **FIXED 2026-09-06** |
 | ~~2~~ | ~~**H5** CORS `origin` callback~~ | **FIXED 2026-09-06** |
-| 3 | **M9** 400 on bad JSON (~~M2 preflight gate~~) | **M2 FIXED 2026-09-06**; M9 is an Express-contract divergence an app hits early |
+| ~~3~~ | ~~**M9** 400 on bad JSON~~ / ~~**M2** preflight gate~~ | **both FIXED 2026-09-06** |
 | 4 | **H6** invisible mid-stream failure | comment corrected; upstream repro still owed on 1.4.2 |
-| 5 | **M8** static mount chaining (~~M7 decode~~) | **M7 FIXED 2026-09-06**; M8 still first-match-only |
+| ~~5~~ | ~~**M8** static mount chaining~~ / ~~**M7** decode~~ | **both FIXED 2026-09-06** |
 | 6 | **L9 / L10 / L11 / L13** (~~L12~~) | **L12 FIXED 2026-09-06**; the rest are each a handful of lines |
 | 7 | Part 4 opt-ins (`idleTimeout`, `maxRequestBodySize`, `reusePort`, compression) | feature work, not defects |
 

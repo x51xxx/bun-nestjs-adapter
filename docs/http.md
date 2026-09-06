@@ -28,9 +28,17 @@ parser — no intermediate `Buffer`/string — unless you opt into the raw body.
 - `multipart/*` → left untouched for upload interceptors to read via
   `req.bunRequest.formData()` (see [File uploads](./file-uploads.md))
 
+A body that claims `application/json` and doesn't parse is answered with **400
+Bad Request** before the handler runs — the same thing `body-parser` does on
+platform-express — rather than handing the handler `undefined` and surfacing as
+a confusing validation error later. Only JSON is policed this way; a `text/*`
+body is whatever bytes arrived.
+
 **Raw body:** create the app with `{ rawBody: true }` to also get `req.rawBody`
-(a `Buffer`) — useful for webhook signature verification. **No body parsing:**
-`{ bodyParser: false }` skips parsing entirely.
+(a `Buffer`) — useful for webhook signature verification. `req.rawBody` is
+populated even for a payload that fails to parse, though the request still ends
+in a 400. **No body parsing:** `{ bodyParser: false }` skips parsing entirely,
+malformed JSON included.
 
 ## Versioning
 
@@ -113,6 +121,15 @@ app.useStaticAssets(join(import.meta.dir, 'public'), {
 
 Served with `Bun.file()` (zero-copy where the OS allows). `prefix` and `index`
 are optional. Like CORS, a static mount uses the manual dispatcher.
+
+Several roots can share a prefix. They are tried in registration order and the
+first one holding the file wins; when they all miss, the request carries on to
+route dispatch — the same chaining `serve-static` gets from `next()`:
+
+```ts
+app.useStaticAssets(join(import.meta.dir, 'overrides'), { prefix: '/static' });
+app.useStaticAssets(join(import.meta.dir, 'public'), { prefix: '/static' });
+```
 
 The URL suffix is percent-decoded one segment at a time before it reaches the
 filesystem, so `/static/my%20file.txt` serves `my file.txt`. The same pass is

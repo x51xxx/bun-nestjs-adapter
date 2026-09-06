@@ -1,5 +1,10 @@
 import { extname, join } from 'path';
-import { Logger, RequestMethod, VersioningOptions } from '@nestjs/common';
+import {
+  BadRequestException,
+  Logger,
+  RequestMethod,
+  VersioningOptions,
+} from '@nestjs/common';
 // Nest 12 added an `exports` map to @nestjs/common where `./*` resolves to
 // `./*.js`, so the bare `@nestjs/common/interfaces` directory import no longer
 // resolves (only `interfaces/index.js` exists on disk). These concrete files
@@ -657,7 +662,9 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       return this.invokeSingle(req, handler, server);
     }
     return maybeParseBody(req, bunReq, this.shimCtx).then(() =>
-      this.invokeSingle(req, handler, server),
+      req.bodyParseError
+        ? this.settleBodyParseError(req, server)
+        : this.invokeSingle(req, handler, server),
     );
   }
 
@@ -696,6 +703,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     }
     const req = buildNativeRouteRequest(bunReq, this.shimCtx, server);
     await maybeParseBody(req, bunReq, this.shimCtx);
+    if (req.bodyParseError) return this.settleBodyParseError(req, server);
     return new Promise<Response>(resolve => {
       const res = makeBunResponse(this, req, resolve, server);
       let idx = 0;
@@ -793,37 +801,66 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
         }
       }
 
+      if (req.bodyParseError) {
+        return this.dispatchError(
+          new BadRequestException(req.bodyParseError.message),
+          req,
+          res,
+        );
+      }
+
       // 1. static assets.
       //
-      // A *classic* root is checked before route dispatch and only for
-      // GET/HEAD; a miss inside serveStatic (file not found / directory)
-      // falls through to route dispatch instead of hard-404ing — a route may
-      // own the path.
+      // *Classic* roots are checked before route dispatch and only for
+      // GET/HEAD. A miss inside serveStatic (file not found / directory) moves
+      // on to the next mount that covers the path, and only when they are all
+      // exhausted does route dispatch run — `serve-static` chains through
+      // `next()` the same way, so two roots on one prefix both get a turn.
       //
       // A *native* root is the mirror image, because that is what Bun's
       // `{ dir }` route does on the hot path: the route map is consulted
       // first (Bun prefers the more specific pattern over `/prefix/*`), the
       // directory answers only what is left, and its miss is a hard 404. So
-      // the match is carried into dispatch and consumed there.
-      const matched =
-        this.staticAssets.length !== 0 ? matchStatic(this.staticAssets, pathname) : null;
-
-      if (matched && !matched.entry.native) {
-        if (req.method === 'GET' || req.method === 'HEAD') {
-          serveStatic(matched, res, req)
-            .then(handled => {
-              if (!handled && !res.finished) {
-                this.dispatchRoutes(req, res, pathname);
-              }
-            })
-            .catch(err => res._reject(err));
-          return;
-        }
+      // it is carried past dispatch and consumed there instead.
+      if (this.staticAssets.length === 0) {
         return this.dispatchRoutes(req, res, pathname);
       }
 
-      this.dispatchRoutes(req, res, pathname, matched);
+      const classic: StaticMatch[] = [];
+      let native: StaticMatch | null = null;
+      for (const match of matchStatic(this.staticAssets, pathname)) {
+        if (match.entry.native) {
+          if (native === null) native = match;
+        } else {
+          classic.push(match);
+        }
+      }
+
+      if (classic.length !== 0 && (req.method === 'GET' || req.method === 'HEAD')) {
+        return this.serveStaticChain(classic, 0, req, res, pathname, native);
+      }
+      this.dispatchRoutes(req, res, pathname, native);
     });
+  }
+
+  /** Try each classic mount in registration order; fall through when all miss. */
+  private serveStaticChain(
+    matches: StaticMatch[],
+    idx: number,
+    req: BunRequest,
+    res: BunResponse,
+    pathname: string,
+    native: StaticMatch | null,
+  ) {
+    if (idx >= matches.length) {
+      return this.dispatchRoutes(req, res, pathname, native);
+    }
+    serveStatic(matches[idx], res, req)
+      .then(handled => {
+        if (handled || res.finished) return;
+        this.serveStaticChain(matches, idx + 1, req, res, pathname, native);
+      })
+      .catch(err => res._reject(err));
   }
 
   /** Route + middleware dispatch shared by the plain path and the static-miss path. */
@@ -863,17 +900,36 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
           if (!res.finished) noRoute();
         });
       })
-      .catch(err => {
-        if (this.errorHandler) {
-          try {
-            this.errorHandler(err, req, res, () => res._reject(err));
-          } catch (e2) {
-            res._reject(e2);
-          }
-        } else {
-          res._reject(err);
-        }
-      });
+      .catch(err => this.dispatchError(err, req, res));
+  }
+
+  /**
+   * Hand an error to the handler Nest registered via `setErrorHandler()`,
+   * falling back to the built-in 500. Shared by route dispatch, middleware and
+   * the body-parser rejection so all three render errors the same way.
+   */
+  private dispatchError(err: unknown, req: BunRequest, res: BunResponse) {
+    if (this.errorHandler) {
+      try {
+        this.errorHandler(err, req, res, () => res._reject(err));
+      } catch (e2) {
+        res._reject(e2);
+      }
+      return;
+    }
+    res._reject(err);
+  }
+
+  /**
+   * A payload the body parser rejected never reaches a handler. `body-parser`
+   * answers 400 for this, so wrap the `SyntaxError` in the exception that
+   * renders the same way and let Nest's error handler write it.
+   */
+  private settleBodyParseError(req: BunRequest, server?: BunServer) {
+    return new Promise<Response>(resolve => {
+      const res = makeBunResponse(this, req, resolve, server);
+      this.dispatchError(new BadRequestException(req.bodyParseError!.message), req, res);
+    });
   }
 
   private async runGlobalMiddleware(req: BunRequest, res: BunResponse) {
@@ -904,16 +960,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
   ) {
     let idx = 0;
     const step = (err?: unknown) => {
-      if (err) {
-        if (this.errorHandler) {
-          try {
-            return this.errorHandler(err, req, res, () => res._reject(err));
-          } catch (e2) {
-            return res._reject(e2);
-          }
-        }
-        return res._reject(err);
-      }
+      if (err) return this.dispatchError(err, req, res);
       if (res.finished) return;
       if (idx >= matches.length) return onExhausted();
       const { route, params } = matches[idx++];
