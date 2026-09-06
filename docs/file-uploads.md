@@ -7,7 +7,7 @@ surface and populate `req.file` / `req.files`.
 | Interceptor | Sets | Signature |
 | --- | --- | --- |
 | `BunFileInterceptor(field, options?)` | `req.file` | single file from one field |
-| `BunFilesInterceptor(field, maxCount?, options?)` | `req.files` | up to `maxCount` files from one field |
+| `BunFilesInterceptor(field, maxCount?, options?)` | `req.files` | files from one field; more than `maxCount` is a 400 |
 | `BunAnyFilesInterceptor(options?)` | `req.files` | every file across all fields |
 
 ## The uploaded file shape
@@ -46,33 +46,53 @@ export class UploadsController {
 
 ## Limits
 
-Pass `options.limits` to reject oversized or too-many-file uploads before they
-buffer fully:
-
 ```ts
 @UseInterceptors(
   BunFileInterceptor('avatar', {
     limits: {
-      fileSize: 10 * 1024 * 1024, // bytes — per file
-      files: 1,                   // max number of files
+      fileSize: 10 * 1024 * 1024, // bytes — per file, checked post-buffer
+      files: 1,                   // max number of files, checked post-buffer
+      totalSize: 12 * 1024 * 1024,// bytes — whole request, checked up front
     },
   }),
 )
 ```
 
+**Which of these actually protects memory.** Multer enforces `fileSize` while
+the upload streams and aborts the connection mid-file. `Request.formData()`
+gives no such hook: it materialises every part before it returns, so `fileSize`
+and `files` can only be *checked* once the bytes are already in memory. They are
+a response policy, not a memory guard.
+
+`totalSize` is the guard that runs first — it is compared against
+`Content-Length` before the body is touched. You rarely need to set it: it
+defaults to `fileSize * <max files> + 1 MiB` whenever `fileSize` is set and the
+file count is known, so
+
 ```ts
-interface BunMultipartOptions {
-  limits?: {
-    fileSize?: number; // max bytes per file
-    files?: number;    // max number of files
-  };
-}
+BunFileInterceptor('avatar', { limits: { fileSize: 1_000_000 } })
 ```
 
-When a limit is exceeded the interceptor throws a standard Nest exception:
+refuses a 2 GB upload up front instead of buffering it and then rejecting it.
+Set it explicitly to widen or tighten the allowance (which covers text fields,
+part headers and boundaries), or to `Infinity` to opt out.
 
-- **`PayloadTooLargeException`** (HTTP 413) — a file exceeds `limits.fileSize`.
-- **`BadRequestException`** (HTTP 400) — more files than `limits.files`.
+A chunked upload carries no `Content-Length` and so cannot be pre-checked;
+`Bun.serve`'s own `maxRequestBodySize` — 128 MB by default — is the backstop
+there.
+
+When a limit is exceeded the interceptor throws a standard Nest exception,
+carrying the same message `@nestjs/platform-express` produces:
+
+- **`PayloadTooLargeException`** (HTTP 413) — `File too large`: the request
+  exceeds `totalSize`, or a file exceeds `limits.fileSize`.
+- **`BadRequestException`** (HTTP 400) — `Too many files`: more files than
+  `limits.files`.
+- **`BadRequestException`** (HTTP 400) — `Unexpected field - <field>`: more
+  files in one field than `maxCount`.
+
+Several interceptors can share one route — the parsed form is memoised on the
+request, so the second one does not hit `Body already used`.
 
 ## Multiple files
 

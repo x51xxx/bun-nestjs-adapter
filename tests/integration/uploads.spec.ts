@@ -51,19 +51,33 @@ describe('platform-bun :: file uploads via Bun.serve formData()', () => {
     expect(json.body).toEqual({ foo: 'bar' });
   });
 
-  it('@UploadedFiles collects all files for one field with maxCount', async () => {
+  it('@UploadedFiles collects every file up to maxCount', async () => {
     const fd = new FormData();
     fd.append('docs', new File(['a'], '1.txt', { type: 'text/plain' }));
     fd.append('docs', new File(['bb'], '2.txt', { type: 'text/plain' }));
     fd.append('docs', new File(['ccc'], '3.txt', { type: 'text/plain' }));
-    fd.append('docs', new File(['dddd'], '4.txt', { type: 'text/plain' }));
 
     const res = await postFormData(`${baseUrl}/uploads/multi`, fd);
     expect(res.status).toBe(201);
     const json = await res.json();
-    expect(json.count).toBe(3); // maxCount=3 truncates
+    expect(json.count).toBe(3);
     expect(json.files.map((f: any) => f.name)).toEqual(['1.txt', '2.txt', '3.txt']);
     expect(json.files[2].size).toBe(3);
+  });
+
+  it('rejects the file past maxCount instead of dropping it', async () => {
+    // Multer answers `400 Unexpected field - <field>` here; this used to
+    // silently truncate, losing an upload the client believed had succeeded.
+    const fd = new FormData();
+    for (const name of ['1.txt', '2.txt', '3.txt', '4.txt']) {
+      fd.append('docs', new File(['x'], name, { type: 'text/plain' }));
+    }
+    const res = await postFormData(`${baseUrl}/uploads/multi`, fd);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      statusCode: 400,
+      message: 'Unexpected field - docs',
+    });
   });
 
   it('BunAnyFilesInterceptor flattens files across fieldnames', async () => {

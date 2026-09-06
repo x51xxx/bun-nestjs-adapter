@@ -227,7 +227,7 @@ from the `GET` handler with the body stripped. Anything that probes with `HEAD`
 
 ---
 
-## M6 — Multipart size limits are enforced *after* the file is in memory
+## M6 — Multipart size limits are enforced *after* the file is in memory · **FIXED**
 
 `src/interceptors/bun-file-interceptor.ts:96-106`:
 
@@ -253,6 +253,31 @@ second interceptor on the same route hits `Body already used` because
 **Note:** a true streaming guard isn't reachable through `Request.formData()`. The
 honest fix is a `content-length` pre-check before calling `formData()`, plus
 documenting that `fileSize` is post-buffer.
+
+**Shipped (2026-09-06).** All three parts, with the Multer behaviour measured
+first (`@nestjs/platform-express` + `multer` from the fixtures):
+
+* **`limits.totalSize`** — a whole-request ceiling compared against
+  `Content-Length` *before* `formData()` reads anything. It defaults to
+  `fileSize * <max files> + 1 MiB` whenever `fileSize` is set and the file count
+  is known, so the headline case (2 GB against `fileSize: 1_000_000`) is now
+  refused up front rather than buffered and then rejected — without the app
+  having to opt in. Explicit `totalSize` overrides it; `Infinity` disables it. A
+  chunked upload has no `Content-Length` and still can't be pre-checked; Bun's
+  `maxRequestBodySize` is the backstop, which is one more reason to expose it
+  (Part 4).
+  The ordering is pinned by a test that sends an *unparseable* multipart body:
+  it comes back `413`, which it could not if the size check ran after the parse.
+* **`maxCount`** now throws `BadRequestException('Unexpected field - <field>')`
+  instead of `list.slice(0, maxCount)`. Silently dropping a file the client
+  believes it uploaded is the worse failure of the two.
+* **`formData()` is memoised** on the request, so two interceptors on one route
+  share a single parse instead of the second one hitting `Body already used`.
+
+Messages now match Multer's exactly — `File too large`, `Too many files`,
+`Unexpected field - <field>` — since a client that switches platforms otherwise
+sees different strings for the same condition. One existing test asserted the
+old truncation behaviour and now asserts the 400.
 
 ---
 
@@ -377,7 +402,7 @@ Second pass over the same three directories. Every finding below marked
 | M1 | FIXED | fixed | `server.requestIP()` + opt-in `setTrustProxy()` |
 | M2 | open | **fixed 2026-09-06** — but the finding's *premise* was wrong; see the correction below |
 | M3 / M4 / M5 / M5a | FIXED | fixed | `compilePath` handles `*name` / `{*name}` / `:id?`; `matchesPathPrefix` shared |
-| M6 | open | **unchanged** | post-buffer limit; `formData()` still not memoised |
+| M6 | open | **fixed 2026-09-06** | was unchanged at audit time; see the note under M6 |
 | M7 | open | **fixed 2026-09-06** | was still open for *classic* mounts; both modes now share `decodeStaticSuffix` |
 | L1 / L3 | FIXED | fixed | |
 | L2 | open | still open | `/x/:a-:b` → one key named `a-:b` on the slow path; the native path correctly drops the route (`bunRoutesLoseParams`) |
@@ -728,6 +753,23 @@ platform-express on both dispatchers. Only the error prose differs.
 **One `.replace()` of collateral value:** both builders now share a single
 `resolveRequestBody()` gate instead of carrying their own copies of the
 "is there a body worth parsing" conditions — the drift that produced H3.
+
+### N3 — a file under an unexpected field name is ignored, not rejected **[confirmed]**
+
+Found while measuring Multer for M6, not part of it. `FileInterceptor('f')`
+rejects a multipart request that also carries a file under any *other* field;
+the Bun interceptors ignore the extra part.
+
+```ts
+@UseInterceptors(FileInterceptor('f'))          // form carries both `f` and `g`
+platform-express → 400 {"message":"Unexpected field - g", …}
+bun adapter      → 201, the `g` part silently dropped
+```
+
+Same `LIMIT_UNEXPECTED_FILE` rule that now backs `maxCount`, just applied to
+field *names* as well as counts. Left alone deliberately: it would start
+rejecting forms that work today, and unlike M6 there is no memory-safety
+argument forcing the change.
 
 ### L9 — `enableCors()` after `listen()` is a silent no-op **[confirmed]**
 
