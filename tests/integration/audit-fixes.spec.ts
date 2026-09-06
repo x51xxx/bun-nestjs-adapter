@@ -208,16 +208,26 @@ describe('audit fix #4 — CORS origin variants', () => {
     }
   });
 
-  it('exposedHeaders + maxAge are emitted', async () => {
+  it('exposedHeaders is emitted on the actual response, maxAge on the preflight', async () => {
     const ctx = await bootCors({
       origin: 'https://x.com',
       exposedHeaders: ['X-Total-Count'],
       maxAge: 600,
     });
     try {
-      const res = await fetch(`${ctx.baseUrl}/`);
-      expect(res.headers.get('access-control-expose-headers')).toBe('X-Total-Count');
-      expect(res.headers.get('access-control-max-age')).toBe('600');
+      // `cors` splits these: Expose-Headers describes *this* response,
+      // Max-Age describes the cached preflight decision.
+      const actual = await fetch(`${ctx.baseUrl}/`);
+      await actual.arrayBuffer();
+      expect(actual.headers.get('access-control-expose-headers')).toBe('X-Total-Count');
+      expect(actual.headers.get('access-control-max-age')).toBeNull();
+
+      const preflight = await fetch(`${ctx.baseUrl}/`, { method: 'OPTIONS' });
+      await preflight.arrayBuffer();
+      expect(preflight.headers.get('access-control-max-age')).toBe('600');
+      expect(preflight.headers.get('access-control-expose-headers')).toBe(
+        'X-Total-Count',
+      );
     } finally {
       await ctx.app.close();
     }

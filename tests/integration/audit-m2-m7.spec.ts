@@ -8,9 +8,13 @@ import { BunHttpAdapter } from '../../src';
 
 // Regression tests for the 2026-09-06 audit (see AUDIT.md):
 //
-//   M2 — `enableCors()` short-circuited *every* `OPTIONS` request to 204, so a
-//        user's own `@Options()` handler never ran. Only a real preflight (one
-//        carrying `Access-Control-Request-Method`) may be answered that way.
+//   M2 / L12 — `enableCors()` short-circuits every `OPTIONS` to a preflight
+//        response, which is what `cors` (platform-express) and `@fastify/cors`
+//        both do; the escape hatch for owning `OPTIONS` yourself is
+//        `preflightContinue`, and `optionsSuccessStatus` picks the status.
+//        Which headers go out is split the same way `cors` splits them:
+//        Allow-Methods / Allow-Headers / Max-Age describe a *future* request
+//        and belong on the preflight only.
 //   M7 — a classic static mount never percent-decoded the path, so any asset
 //        with a space or a non-ASCII character in its name was unreachable —
 //        while the same file served fine through `{ native: true }`.
@@ -53,38 +57,28 @@ class OptionsController {
 @Module({ controllers: [OptionsController] })
 class OptionsModule {}
 
+const ORIGIN = 'https://app.example';
 const PREFLIGHT = {
-  origin: 'https://app.example',
+  origin: ORIGIN,
   'access-control-request-method': 'GET',
 };
 
-describe('M2 — CORS only answers real preflights', () => {
-  it('lets a user @Options() route run when the request is not a preflight', async () => {
-    const base = await boot(OptionsModule, a => a.enableCors({ origin: true }));
-    const res = await fetch(`${base}/opt`, {
-      method: 'OPTIONS',
-      headers: { origin: 'https://app.example' },
-    });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ custom: 'options' });
-  });
-
-  it('still applies the CORS headers to that non-preflight response', async () => {
-    const base = await boot(OptionsModule, a => a.enableCors({ origin: true }));
-    const res = await fetch(`${base}/opt`, {
-      method: 'OPTIONS',
-      headers: { origin: 'https://app.example' },
-    });
-    await res.arrayBuffer();
-    expect(res.headers.get('access-control-allow-origin')).toBe('https://app.example');
-  });
-
-  it('short-circuits a real preflight to 204 before the route', async () => {
+describe('M2 — preflight handling matches the cors package', () => {
+  it('answers a preflight with 204 before the route', async () => {
     const base = await boot(OptionsModule, a => a.enableCors({ origin: true }));
     const res = await fetch(`${base}/opt`, { method: 'OPTIONS', headers: PREFLIGHT });
     expect(res.status).toBe(204);
     expect((await res.text()).length).toBe(0);
-    expect(res.headers.get('access-control-allow-origin')).toBe('https://app.example');
+    expect(res.headers.get('access-control-allow-origin')).toBe(ORIGIN);
+  });
+
+  it('treats a bare OPTIONS as a preflight too, exactly as cors does', async () => {
+    const base = await boot(OptionsModule, a => a.enableCors({ origin: true }));
+    const res = await fetch(`${base}/opt`, {
+      method: 'OPTIONS',
+      headers: { origin: ORIGIN },
+    });
+    expect(res.status).toBe(204);
   });
 
   it('preflights a route that has no @Options() handler', async () => {
@@ -93,22 +87,91 @@ describe('M2 — CORS only answers real preflights', () => {
     expect(res.status).toBe(204);
   });
 
-  it('404s a plain OPTIONS that no route owns — as it does with CORS off', async () => {
-    const withCors = await boot(OptionsModule, a => a.enableCors({ origin: true }));
-    const a = await fetch(`${withCors}/ping`, {
+  it('preflightContinue lets a user @Options() route own the response', async () => {
+    const base = await boot(OptionsModule, a =>
+      a.enableCors({ origin: true, preflightContinue: true }),
+    );
+    const res = await fetch(`${base}/opt`, { method: 'OPTIONS', headers: PREFLIGHT });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ custom: 'options' });
+  });
+
+  it('preflightContinue still applies the preflight headers', async () => {
+    const base = await boot(OptionsModule, a =>
+      a.enableCors({ origin: true, preflightContinue: true, maxAge: 600 }),
+    );
+    const res = await fetch(`${base}/opt`, { method: 'OPTIONS', headers: PREFLIGHT });
+    await res.arrayBuffer();
+    expect(res.headers.get('access-control-allow-origin')).toBe(ORIGIN);
+    expect(res.headers.get('access-control-max-age')).toBe('600');
+  });
+
+  it('preflightContinue 404s a path no route owns', async () => {
+    const base = await boot(OptionsModule, a =>
+      a.enableCors({ origin: true, preflightContinue: true }),
+    );
+    const res = await fetch(`${base}/ping`, { method: 'OPTIONS', headers: PREFLIGHT });
+    expect(res.status).toBe(404);
+  });
+
+  it('optionsSuccessStatus overrides the 204', async () => {
+    const base = await boot(OptionsModule, a =>
+      a.enableCors({ origin: true, optionsSuccessStatus: 200 }),
+    );
+    const res = await fetch(`${base}/opt`, { method: 'OPTIONS', headers: PREFLIGHT });
+    await res.arrayBuffer();
+    expect(res.status).toBe(200);
+  });
+});
+
+describe('L12 — preflight-only headers stay on the preflight', () => {
+  const opts = {
+    origin: true as const,
+    maxAge: 600,
+    allowedHeaders: ['x-custom'],
+    exposedHeaders: ['x-total-count'],
+  };
+
+  it('omits Allow-Methods, Allow-Headers and Max-Age from a normal response', async () => {
+    const base = await boot(OptionsModule, a => a.enableCors(opts));
+    const res = await fetch(`${base}/ping`, { headers: { origin: ORIGIN } });
+    await res.arrayBuffer();
+    expect(res.headers.get('access-control-allow-methods')).toBeNull();
+    expect(res.headers.get('access-control-allow-headers')).toBeNull();
+    expect(res.headers.get('access-control-max-age')).toBeNull();
+  });
+
+  it('keeps Allow-Origin, Allow-Credentials and Expose-Headers on it', async () => {
+    const base = await boot(OptionsModule, a =>
+      a.enableCors({ ...opts, credentials: true }),
+    );
+    const res = await fetch(`${base}/ping`, { headers: { origin: ORIGIN } });
+    await res.arrayBuffer();
+    expect(res.headers.get('access-control-allow-origin')).toBe(ORIGIN);
+    expect(res.headers.get('access-control-allow-credentials')).toBe('true');
+    expect(res.headers.get('access-control-expose-headers')).toBe('x-total-count');
+  });
+
+  it('sends the whole set on the preflight', async () => {
+    const base = await boot(OptionsModule, a => a.enableCors(opts));
+    const res = await fetch(`${base}/ping`, { method: 'OPTIONS', headers: PREFLIGHT });
+    await res.arrayBuffer();
+    expect(res.headers.get('access-control-allow-methods')).toBe(
+      'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+    );
+    expect(res.headers.get('access-control-allow-headers')).toBe('x-custom');
+    expect(res.headers.get('access-control-max-age')).toBe('600');
+    expect(res.headers.get('access-control-expose-headers')).toBe('x-total-count');
+  });
+
+  it('reflects Access-Control-Request-Headers when no allowlist is configured', async () => {
+    const base = await boot(OptionsModule, a => a.enableCors({ origin: true }));
+    const res = await fetch(`${base}/ping`, {
       method: 'OPTIONS',
-      headers: { origin: 'https://app.example' },
+      headers: { ...PREFLIGHT, 'access-control-request-headers': 'x-a,x-b' },
     });
-    await a.arrayBuffer();
-    await app?.close();
-    app = null;
-
-    const withoutCors = await boot(OptionsModule);
-    const b = await fetch(`${withoutCors}/ping`, { method: 'OPTIONS' });
-    await b.arrayBuffer();
-
-    expect(a.status).toBe(404);
-    expect(b.status).toBe(404);
+    await res.arrayBuffer();
+    expect(res.headers.get('access-control-allow-headers')).toBe('x-a,x-b');
   });
 });
 

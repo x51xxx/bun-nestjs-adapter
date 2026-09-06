@@ -36,6 +36,18 @@ export interface CorsOptions {
   allowedHeaders?: string | string[];
   exposedHeaders?: string | string[];
   maxAge?: number;
+  /**
+   * Hand the preflight on to normal routing instead of ending it here. The
+   * preflight headers are still applied, so an `@Options()` handler owns the
+   * status and the body. Mirrors `cors` / `@fastify/cors`; default `false`.
+   */
+  preflightContinue?: boolean;
+  /**
+   * Status for a preflight this middleware ends itself. `cors`'s default is
+   * `204`; `200` is the usual workaround for legacy browsers that choke on a
+   * bodyless 204.
+   */
+  optionsSuccessStatus?: number;
 }
 
 const logger = new Logger('BunHttpAdapter');
@@ -78,10 +90,21 @@ function resolveStaticOrigin(
   return undefined;
 }
 
+/**
+ * Write the CORS headers for one request.
+ *
+ * `isPreflight` decides *which* headers, exactly as the `cors` package splits
+ * them: `Allow-Methods`, `Allow-Headers` and `Max-Age` describe a future
+ * request and belong on the preflight only, while `Allow-Origin`,
+ * `Allow-Credentials` and `Expose-Headers` describe this one and go on both.
+ * Emitting the preflight set on every response — which this used to do — is
+ * bytes on the wire that no browser reads.
+ */
 export function applyCorsHeaders(
   req: BunRequest,
   res: BunResponse,
   options: CorsOptions | true,
+  isPreflight = false,
 ): void {
   const opts: CorsOptions = options === true ? {} : options;
   const h = res.headers;
@@ -146,22 +169,27 @@ export function applyCorsHeaders(
     }
   }
 
+  if (credentials) h['access-control-allow-credentials'] = 'true';
+  // `cors` emits Expose-Headers on both the preflight and the actual response.
+  if (opts.exposedHeaders) {
+    h['access-control-expose-headers'] = Array.isArray(opts.exposedHeaders)
+      ? opts.exposedHeaders.join(',')
+      : opts.exposedHeaders;
+  }
+
+  if (!isPreflight) return;
+
   h['access-control-allow-methods'] = Array.isArray(opts.methods)
     ? opts.methods.join(',')
     : (opts.methods ?? 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS');
-  if (credentials) h['access-control-allow-credentials'] = 'true';
   if (opts.allowedHeaders) {
     h['access-control-allow-headers'] = Array.isArray(opts.allowedHeaders)
       ? opts.allowedHeaders.join(',')
       : opts.allowedHeaders;
   } else {
+    // No allowlist configured — reflect what the preflight asked for.
     const reqHeaders = req.headers['access-control-request-headers'];
     if (reqHeaders) h['access-control-allow-headers'] = reqHeaders;
-  }
-  if (opts.exposedHeaders) {
-    h['access-control-expose-headers'] = Array.isArray(opts.exposedHeaders)
-      ? opts.exposedHeaders.join(',')
-      : opts.exposedHeaders;
   }
   if (opts.maxAge !== undefined) {
     h['access-control-max-age'] = String(opts.maxAge);

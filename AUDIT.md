@@ -375,7 +375,7 @@ Second pass over the same three directories. Every finding below marked
 | H1b / H1c | FIXED | fixed (read) | `dispatchNotFound` passes a real `next` |
 | H2 / H3 | FIXED | fixed | one `createRequestShim()`; SSE works on both dispatchers |
 | M1 | FIXED | fixed | `server.requestIP()` + opt-in `setTrustProxy()` |
-| M2 | open | **fixed 2026-09-06** | was still open at audit time; see below |
+| M2 | open | **fixed 2026-09-06** — but the finding's *premise* was wrong; see the correction below |
 | M3 / M4 / M5 / M5a | FIXED | fixed | `compilePath` handles `*name` / `{*name}` / `:id?`; `matchesPathPrefix` shared |
 | M6 | open | **unchanged** | post-buffer limit; `formData()` still not memoised |
 | M7 | open | **fixed 2026-09-06** | was still open for *classic* mounts; both modes now share `decodeStaticSuffix` |
@@ -561,13 +561,34 @@ OPTIONS /opt  (real preflight)                   → 204 ""
 The `cors` package gates on `access-control-request-method` and otherwise calls
 `next()`. Same one-line fix as before.
 
-**Shipped (2026-09-06).** `handle()` now short-circuits only when the request
-carries `access-control-request-method`; everything else falls through to
-routing, so a user `@Options()` handler runs and an unowned path 404s exactly as
-it does with CORS disabled. The CORS headers are still applied to both.
-Note this does **not** close **L12** — `applyCorsHeaders()` still writes
-`access-control-allow-methods` on every response rather than on preflights only.
-The gate now exists to hang that on.
+> ### Correction — the sentence above is wrong
+>
+> Read from the source both Nest platforms actually ship
+> (`cors@2.8.5/lib/index.js:163`, `@fastify/cors/index.js:192`): **neither gates
+> on `Access-Control-Request-Method`.** `cors` branches on `req.method ===
+> 'OPTIONS'` alone and answers every one of them with the preflight headers and
+> `optionsSuccessStatus`; `@fastify/cors` does the same, and only demands
+> `Origin` + `Access-Control-Request-Method` when you opt into
+> `strictPreflight: true` (default `false`).
+>
+> So the adapter's original behaviour *was* platform-express parity, and the
+> first attempt at this finding — an unconditional ACRM gate, shipped in
+> `ea09001` — moved it away from both references instead of towards them. The
+> genuine gap was the missing escape hatch: on Express you keep your own
+> `@Options()` route by passing `preflightContinue`, and the adapter had no such
+> option.
+>
+> This is the same failure the 2026-07-26 audit warned about in its own closing
+> line — a cause inferred rather than measured. Reading the reference
+> implementation costs one `grep`.
+
+**Shipped (2026-09-06, superseding `ea09001`).** Exact `cors` semantics: any
+`OPTIONS` is a preflight, ended with `optionsSuccessStatus` (default `204`),
+unless `preflightContinue: true` applies the preflight headers and falls through
+to routing — which is how a user `@Options()` handler now owns the response. Both
+options are new on `CorsOptions`. `Content-Length: 0` is set the way `cors` sets
+it; measured on Bun 1.4.0, Bun drops it on a `204` and keeps it on the `200` an
+app selects, which is the case the Safari workaround exists for.
 
 ### M7 — classic static mounts still never percent-decode the path **[re-confirmed]** · **FIXED**
 
@@ -670,7 +691,7 @@ Host: [::1]:1234  →  req.hostname === "["
 
 Strip the brackets first (Express returns `[::1]`).
 
-### L12 — preflight-only CORS headers are emitted on every response
+### L12 — preflight-only CORS headers are emitted on every response · **FIXED**
 
 `applyCorsHeaders()` unconditionally sets `access-control-allow-methods` (and
 `access-control-allow-headers` when the request carries
@@ -680,6 +701,14 @@ those only on a preflight. Confirmed in the M2 probe above: a plain
 browsers, but it is bytes on every response and a visible behavioural
 difference from the Express adapter. Fixing M2 puts the gate in the right place
 to fix this too.
+
+**Shipped (2026-09-06).** `applyCorsHeaders()` takes an `isPreflight` flag and
+splits the set exactly as `cors` does — `Allow-Methods`, `Allow-Headers` and
+`Max-Age` describe a *future* request and go on the preflight only;
+`Allow-Origin`, `Allow-Credentials` and `Expose-Headers` describe this one and
+go on both. One existing test (`audit-fixes.spec.ts`, "exposedHeaders + maxAge
+are emitted") had encoded the bug by asserting `Max-Age` on a plain `GET`; it
+now asserts the split.
 
 ### L13 — `close()` does not await `Bun.serve`'s stop promise
 
@@ -796,7 +825,7 @@ now shares body chunks.
 | 3 | **M9** 400 on bad JSON (~~M2 preflight gate~~) | **M2 FIXED 2026-09-06**; M9 is an Express-contract divergence an app hits early |
 | 4 | **H6** invisible mid-stream failure | comment corrected; upstream repro still owed on 1.4.2 |
 | 5 | **M8** static mount chaining (~~M7 decode~~) | **M7 FIXED 2026-09-06**; M8 still first-match-only |
-| 6 | **L9 / L10 / L11 / L13** | each is a handful of lines |
+| 6 | **L9 / L10 / L11 / L13** (~~L12~~) | **L12 FIXED 2026-09-06**; the rest are each a handful of lines |
 | 7 | Part 4 opt-ins (`idleTimeout`, `maxRequestBodySize`, `reusePort`, compression) | feature work, not defects |
 
 **Docs gap:** closed alongside the fixes — `docs/streaming-and-sse.md` now

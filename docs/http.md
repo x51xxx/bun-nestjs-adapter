@@ -51,10 +51,37 @@ app.enableCors({ origin: 'https://example.com', credentials: true });
 Enabling CORS routes requests through the manual dispatcher (it can't be modelled
 by the native `routes` map), so it disables the fast path.
 
-Only a **preflight** — an `OPTIONS` request carrying `Access-Control-Request-Method`
-— is answered with `204` before dispatch. A plain `OPTIONS` goes through normal
-routing, so your own `@Options()` handler still runs (and, as with CORS off,
-a path no route owns still 404s). The CORS headers are applied either way.
+Every `OPTIONS` request is treated as a preflight and answered before dispatch —
+the same rule `cors` (which `@nestjs/platform-express` uses) and `@fastify/cors`
+apply; neither sniffs `Access-Control-Request-Method`. To own `OPTIONS` yourself,
+use `preflightContinue`, which applies the preflight headers and then falls
+through to normal routing:
+
+```ts
+app.enableCors({ origin: true, preflightContinue: true });
+
+@Options('thing')
+thing() {
+  return { handled: 'by the controller' };
+}
+```
+
+`optionsSuccessStatus` picks the status for a preflight the adapter ends itself
+(`204` by default; `200` is the usual workaround for legacy browsers).
+
+Which headers go out depends on the kind of request, again matching `cors`:
+
+| header | preflight | actual response |
+| --- | --- | --- |
+| `Access-Control-Allow-Origin` | ✔ | ✔ |
+| `Access-Control-Allow-Credentials` | ✔ | ✔ |
+| `Access-Control-Expose-Headers` | ✔ | ✔ |
+| `Access-Control-Allow-Methods` | ✔ | — |
+| `Access-Control-Allow-Headers` | ✔ | — |
+| `Access-Control-Max-Age` | ✔ | — |
+
+The bottom three describe a *future* request, so they only mean anything on a
+preflight.
 
 `origin` accepts a string, `true`, a `RegExp`, an array of either, or a function
 in one of two shapes — told apart by how many parameters it declares:

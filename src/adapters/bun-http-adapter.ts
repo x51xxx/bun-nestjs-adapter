@@ -774,18 +774,21 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       const res = makeBunResponse(this, req, resolve, bunServer);
 
       if (this.corsOptions) {
-        applyCorsHeaders(req, res, this.corsOptions);
-        // Only a *preflight* is answered here. The `cors` package gates on
-        // `Access-Control-Request-Method` and calls `next()` otherwise; without
-        // that gate every `OPTIONS` became a 204 the moment CORS was enabled,
-        // so a user's own `@Options()` handler never ran. A plain OPTIONS now
-        // goes through normal dispatch (and 404s if no route owns it, exactly
-        // as it does with CORS switched off).
-        if (
-          req.method === 'OPTIONS' &&
-          req.headers['access-control-request-method'] !== undefined
-        ) {
-          res.statusCode = 204;
+        // Every `OPTIONS` counts as a preflight — that is what `cors` (which
+        // @nestjs/platform-express uses) and `@fastify/cors` both do; neither
+        // sniffs `Access-Control-Request-Method` by default. The documented way
+        // to let your own `@Options()` handler run is `preflightContinue`,
+        // which applies the preflight headers and then falls through to normal
+        // routing.
+        const isPreflight = req.method === 'OPTIONS';
+        applyCorsHeaders(req, res, this.corsOptions, isPreflight);
+        if (isPreflight && this.corsOptions.preflightContinue !== true) {
+          res.statusCode = this.corsOptions.optionsSuccessStatus ?? 204;
+          // `cors` sets this because Safari hangs on a bodyless preflight
+          // without it. Measured on Bun 1.4.0: Bun drops the header on a 204
+          // (where the RFC forbids it) and keeps it on the 2xx an app picks via
+          // `optionsSuccessStatus` — which is the case the workaround is for.
+          res.headers['content-length'] = '0';
           return this.end(res);
         }
       }
