@@ -949,8 +949,13 @@ ALS is what CLS and tracing integrations (`nestjs-cls`, OpenTelemetry, pino's
 async context) sit on, so this one matters for long-running apps. (Nest's own
 request-scoped providers use `ContextIdFactory`, not ALS — they are unaffected.)
 
-**Recommendation:** add 1.4.2 to the CI matrix alongside the pinned 1.4.0, and
-re-run `_probe` H6 there before filing upstream.
+**Recommendation (done 2026-09-07):** the **Test** job is now a matrix over
+`1.4.0` and `1.4.2` with `fail-fast: false`, Codecov uploaded from the 1.4.0 leg
+only — both legs cover the same lines. Both versions are pinned: a floating
+`latest` would turn an upstream regression into a red build on an unrelated PR.
+`bun install --frozen-lockfile` was checked against 1.4.2 before the leg was
+added, so it cannot fail on the lockfile. The H6 re-run happened first and
+withdrew the finding; see its note above.
 
 ---
 

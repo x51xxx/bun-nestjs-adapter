@@ -16,7 +16,8 @@ Key capabilities:
 - File uploads via `BunFileInterceptor`, `BunFilesInterceptor`, `BunAnyFilesInterceptor` using native `Request.formData()`.
 - WebSocket via `BunWsAdapter` with Bun's native pub/sub (`subscribe` / `unsubscribe` / `publish`).
 
-Runtime requirement: **Bun ≥ 1.3.0** (engines field says `>=1.3.0`; CI pins `1.4.0`).
+Runtime requirement: **Bun ≥ 1.3.0** (engines field says `>=1.3.0`; CI pins
+`1.4.0` and also runs the test suite on `1.4.2`).
 
 ---
 
@@ -269,11 +270,17 @@ perf(adapter): drop Headers proxy in favour of eager copy
 Runs on push/PR to `main`:
 1. **Lint + Typecheck** — `bun run lint`, `bun run typecheck`
 2. **Build** — `bun run build` + upload `dist/` artifact
-3. **Test (own integration suite)** — `bun test --preload ... --coverage` + Codecov upload
+3. **Test (own integration suite)** — `bun test --preload ... --coverage`, as a
+   matrix over Bun `1.4.0` and `1.4.2` (`fail-fast: false`); Codecov is uploaded
+   from the `1.4.0` leg only, since both legs cover the same lines
 4. **Compatibility (upstream fixtures)** — `fixtures-install.sh` + `bun run test:fixtures`
 5. **Bench smoke** — `bun run bench:quick`
 
-Bun version pinned to `1.4.0` across all jobs.
+Bun `1.4.0` is pinned across every job; the **Test** job additionally runs the
+suite on `1.4.2`, the current release. Both versions are pinned deliberately — a
+floating `latest` turns an upstream regression into a red build on an unrelated
+PR. Adding a version is a deliberate act: run the suite against it locally
+first.
 
 ### Security (`.github/workflows/security.yml`)
 Runs on push/PR to `main` + weekly schedule:
