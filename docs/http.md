@@ -51,6 +51,25 @@ app.enableCors({ origin: 'https://example.com', credentials: true });
 Enabling CORS routes requests through the manual dispatcher (it can't be modelled
 by the native `routes` map), so it disables the fast path.
 
+`origin` accepts a string, `true`, a `RegExp`, an array of either, or a function
+in one of two shapes — told apart by how many parameters it declares:
+
+```ts
+// The `cors`-package contract, as shown in the Nest docs.
+app.enableCors({
+  origin: (requestOrigin, callback) => callback(null, allowlist.has(requestOrigin)),
+});
+
+// This adapter's shorter form: the whole request shim, returning the value.
+// Annotate the parameter — TypeScript can't infer it out of a union of
+// function types whose arities differ.
+app.enableCors({ origin: (req: BunRequest) => req.headers['x-tenant'] === 'acme' });
+```
+
+The callback must be invoked **synchronously** — the header has to be set before
+dispatch, so an async lookup can't be awaited. A function that calls back later
+emits no `Access-Control-Allow-Origin` and logs a warning once.
+
 ## Static assets
 
 ```ts

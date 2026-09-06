@@ -350,3 +350,446 @@ Minor, but a behavioural difference from the Express adapter it mirrors.
 slow-path divergence*. A test helper that runs the same assertion set through both
 dispatchers (parameterise the existing integration specs over
 `withMiddleware: false | true`) would have caught H2, M3 and M1 mechanically.
+
+---
+
+# Audit — 2026-09-06
+
+Date: 2026-09-06 · Commit: `56e5b80` · Runtime: **Bun 1.4.0** (latest released: 1.4.2)
+
+**Baseline:** `bun run test` → **207 pass / 3 skip / 0 fail**.
+
+Second pass over the same three directories. Every finding below marked
+**[confirmed]** was reproduced against a live `Bun.serve` through a real
+`NestFactory.create(...)` app; probe code is inlined. This section also
+**corrects three claims** made in the 2026-07-26 audit above.
+
+---
+
+## Part 1 — status sweep of the 2026-07-26 findings
+
+| # | 2026-07-26 status | Verified today | Note |
+|---|---|---|---|
+| H1a | FIXED | **partially** — no longer hangs, but the failure is now *invisible* | see **H6** below |
+| H1 (premise) | — | **claim is wrong** | H1 argued "Bun never times these out — the socket stays open, the connection leaks". Measured: a handler whose promise never settles is **closed by Bun after 12.0 s** (default `idleTimeout`). The fix was still right; the leak argument for its priority was not. |
+| H1b / H1c | FIXED | fixed (read) | `dispatchNotFound` passes a real `next` |
+| H2 / H3 | FIXED | fixed | one `createRequestShim()`; SSE works on both dispatchers |
+| M1 | FIXED | fixed | `server.requestIP()` + opt-in `setTrustProxy()` |
+| M2 | open | **still open [confirmed]** | see below |
+| M3 / M4 / M5 / M5a | FIXED | fixed | `compilePath` handles `*name` / `{*name}` / `:id?`; `matchesPathPrefix` shared |
+| M6 | open | **unchanged** | post-buffer limit; `formData()` still not memoised |
+| M7 | open | **still open [confirmed]** for *classic* mounts | the native mount decodes correctly (`decodeStaticSuffix`) |
+| L1 / L3 | FIXED | fixed | |
+| L2 | open | still open | `/x/:a-:b` → one key named `a-:b` on the slow path; the native path correctly drops the route (`bunRoutesLoseParams`) |
+| **L4** | open | **claim is wrong — see correction** | |
+| **L5** | open | **appears fixed** (read-confirmed) | `BunWsAdapter.create()` back-fills `server.bunServer` from `getHttpServer().bunServer` at *create* time, so a gateway registered after `listen()` can publish |
+| L6 | open | still open | `CompiledRoute.isMiddleware` + the `'USE'` branch in `collect()` are unreachable (`add()` is never called with `'USE'`); `ServerEntry.serverEmitter` still assigned, never read |
+| L7 | open | still open | `matchAll()` is O(routes); only bites the slow path |
+| L8 | open | still open | `maxAge` emits `Max-Age` without `Expires` |
+
+### Correction to L4 — the proposed fix is not implementable
+
+L4 says the `error` callback is "never registered" in
+`STANDALONE_WEBSOCKET_HANDLERS` and `http/server.ts`. **Bun's
+`WebSocketHandler` has no `error` callback at all** — the full set is
+`open` / `message` / `close` / `drain` / `ping` / `pong`
+(`node_modules/bun-types/serve.d.ts:330-430`).
+
+So `BunWsClient.__onError` / `bindErrorHandler()` are dead by construction, not
+by omission. The honest options are (a) delete `__onError` and document that WS
+errors surface as `close` with a status code, or (b) synthesise an `'error'`
+event from a non-1000 close code. `ping`/`pong` *are* available and unused —
+see Part 4.
+
+---
+
+## Part 2 — new findings
+
+### H4 — SSE and every long-lived stream is killed after 10 s **[confirmed]** · **FIXED**
+
+`Bun.serve`'s `idleTimeout` defaults to **10 seconds**. The adapter never sets
+it, and never calls `server.timeout(req, 0)` when `ensureStreaming()`
+(`src/http/response.ts:254`) upgrades a response to a `ReadableStream`. Any SSE
+feed, long-poll or slow download with a >10 s gap between chunks is dropped by
+the runtime — with Bun printing its own warning to the server log.
+
+```ts
+@Sse('sse')
+sse(): Observable<any> {
+  return new Observable(sub => { sub.next({ data: 'hello' }); }); // one event, then silence
+}
+```
+
+```
+HTTP/1.1 200 OK … Transfer-Encoding: chunked
+14\r\n\nid: 1\ndata: hello\n\n\r\n
+<CLOSED BY SERVER after 12.0s>
+warn: Bun.serve() timed out a request after 10 seconds. Pass `idleTimeout` to configure.
+```
+
+This is the single most production-visible defect found in this pass: a
+heartbeat-less SSE endpoint — the default shape of every Nest `@Sse()`
+tutorial — silently disconnects every client every 10 seconds.
+
+**Fix — one option, not two.** Raising the global `idleTimeout` *cannot* solve
+this: Bun caps it at 255 seconds.
+
+```
+Bun.serve({ idleTimeout: 3600 }) → throws: "Bun.serve expects idleTimeout to be 255 or less"
+Bun.serve({ idleTimeout: 255  }) → accepted
+```
+
+The necessary fix is the per-request opt-out, `server.timeout(req, 0)`, called
+from `ensureStreaming()` when a response upgrades to a stream. Measured against
+raw `Bun.serve`, no Nest:
+
+```
+/plain  (idle stream, no timeout call)   → CLOSED by server after 12.0s
+/keep   (s.timeout(req, 0) before reply) → STILL OPEN after 16s   ✔
+```
+
+Cost is plumbing, not logic: `makeBunResponse(adapter, req, resolve)` has
+`req.bunRequest` but no `server` handle — `runBunRouteSingle` /
+`runBunRouteChain` / `handle()` all receive one and would have to thread it
+through. Exposing `idleTimeout` as an adapter option (Part 4) is still worth
+doing for slow *uploads*, but it is not the SSE fix.
+
+**Shipped.** `makeBunResponse()` takes an optional `RequestTimeoutSource`
+(structural, like `RequestIpSource`), threaded from all three call sites, and
+exposes `_disableIdleTimeout()`. It fires from `ensureStreaming()`, from
+`streamNodeReadable()`, and from `reply()`'s `ReadableStream` branch — so
+`@Sse()`, `StreamableFile`, a bare `Readable` and a handler that returns a web
+stream directly are all covered, on both dispatchers. Regression tests in
+`tests/integration/audit-h4-h5.spec.ts` assert the call through each dispatcher
+and that a *buffered* response never touches the timer; the real 13 s
+end-to-end check is behind `RUN_SLOW_TESTS=1` (verified passing).
+
+### H5 — `enableCors({ origin: (origin, callback) => … })` emits no `Access-Control-Allow-Origin` **[confirmed]** · **FIXED**
+
+`src/http/cors.ts:14` types `origin` as `(req: BunRequest) => string | boolean | …`.
+That is **not** the signature Nest documents. Nest re-exports the `cors`
+package's `CorsOptions`, whose function form is
+`(requestOrigin: string, callback: (err: Error | null, origin?: boolean) => void) => void`.
+
+An app that follows the Nest docs verbatim gets its function called with the
+*request object* as `origin`, and a `callback` that is `undefined`. The return
+value is `undefined`, so `originHeader` is never set and the header is omitted
+entirely — CORS is silently off, and the browser blocks every cross-origin call.
+
+```ts
+app.enableCors({ origin: (origin, cb) => cb(null, true) });   // straight from the Nest docs
+```
+```
+GET /ping (Origin: http://x) → 200, access-control-allow-origin: null
+```
+
+Worse than a crash: nothing is logged, and the adapter *does* emit the other
+CORS headers, so the response looks CORS-enabled at a glance.
+
+**Fix.** Detect arity: `fn.length >= 2` → call `fn(reqOrigin, (err, allow) => …)`
+(the `cors` contract, sync-callback only, matching the module doc-comment's
+existing "async forms unsupported" caveat); otherwise keep the current
+`(req) => …` form. Both shapes then work.
+
+**Shipped.** Arity dispatch as above, plus a shared `resolveStaticOrigin()` that
+reduces every static shape — `true` / `'*'` / string / `RegExp` / array — to the
+header value, so a callback answering `[/\.example$/]` behaves exactly like the
+same value passed inline (the old one-argument path only understood `string` and
+`true`). A callback that is *not* invoked synchronously now logs a one-time
+warning instead of silently emitting nothing.
+
+One cost, documented in `docs/http.md` and in the type's doc-comment:
+`origin` is now a union of two function types with different arities, and
+TypeScript declines to pick a contextual signature out of that. The
+one-argument form therefore needs its parameter annotated
+(`origin: (req: BunRequest) => …`) under `noImplicitAny`; the two-argument form
+infers normally. Verified with `tsc --noImplicitAny` over every documented
+shape.
+
+### H6 — a handler that throws after `res.write()` is indistinguishable from success **[confirmed]** · corrects H1a
+
+H1a's fix stopped the hang. But the rationale recorded for it — "erroring the
+stream aborts the chunked response, which is the only way left to tell the
+client it failed" (`src/http/response.ts:87-90`) — **does not hold on Bun 1.4.0**.
+`streamCtrl.error()` makes Bun emit the *terminating* `0\r\n\r\n` chunk and
+close cleanly:
+
+```ts
+@Get('boom')  async boom(@Res() res: any) { res.write('partial'); throw new Error('exploded'); }
+@Get('ok')    async ok(@Res()  res: any) { res.write('partial'); res.end(); }
+```
+```
+/boom → "HTTP/1.1 200 OK\r\n…\r\nContent-Length: 7\r\n\r\npartial"     ← byte-identical
+/ok   → "HTTP/1.1 200 OK\r\n…\r\nContent-Length: 7\r\n\r\npartial"     ← to the success case
+```
+
+And in genuine chunked mode (headers already flushed, two 100-byte writes, then
+a throw):
+
+```
+… Transfer-Encoding: chunked\r\n\r\n64\r\nAAA…\r\n64\r\nBBB…\r\n0\r\n\r\n   <close hadError=false>
+```
+
+The client sees a well-formed, complete `200`. A truncated payload is accepted
+as final. There is no socket handle reachable from a `Response(stream)` body,
+so the adapter cannot abort the connection itself.
+
+**Next step:** re-run the probe on Bun **1.4.2** — 1.4.1's notes include
+"fixed streaming response body failures" and a fix for handlers whose promises
+never settle. If unchanged, this is an upstream report with the repro above.
+Until then: (a) correct the misleading comment in `response.ts`, and (b) for
+`@Sse()` specifically, emit a terminal `event: error` frame before erroring the
+controller, which *is* observable by an `EventSource` consumer.
+
+**Partially addressed (2026-09-06):** (a) is done — the comment in `_reject()`
+now states what `.error()` actually buys (it settles the request instead of
+hanging it) and what it does not (the client cannot tell a truncated response
+from a complete one), and points at the in-band workaround. The behaviour itself
+is unchanged and still needs the 1.4.2 re-check.
+
+### M2 — `enableCors()` still swallows user-defined `OPTIONS` routes **[re-confirmed]**
+
+Unchanged since 2026-07-26. `handle()` (`src/adapters/bun-http-adapter.ts:~730`)
+short-circuits **every** `OPTIONS` to 204 once CORS is on, whether or not the
+request is a preflight:
+
+```
+OPTIONS /opt  (no Access-Control-Request-Method) → 204 ""    ← @Options('opt') handler never runs
+OPTIONS /opt  (real preflight)                   → 204 ""
+```
+
+The `cors` package gates on `access-control-request-method` and otherwise calls
+`next()`. Same one-line fix as before.
+
+### M7 — classic static mounts still never percent-decode the path **[re-confirmed]**
+
+The 2026-07-26 fix landed only on the **native** side (`decodeStaticSuffix()`).
+`matchStatic()` → `serveStatic()` still hand the raw, still-encoded suffix to
+`join()`:
+
+```
+file on disk: "my file.txt",  app.useStaticAssets(root, { prefix: '/s' })
+GET /s/my%20file.txt → 404 {"message":"Cannot GET /s/my%20file.txt", …}
+```
+
+So the *same* file is reachable through `{ native: true }` and unreachable
+through the default mount. Decode per segment (reuse `decodeStaticSuffix`) and
+re-check the traversal guard in the same change — the guard currently only
+works *because* nothing is decoded.
+
+### M8 — a second static mount on the same prefix is never consulted **[confirmed]**
+
+`matchStatic()` (`src/http/static.ts:46-56`) `return`s on the **first** entry
+whose prefix matches. When `serveStatic()` then misses (ENOENT → `false`), the
+request falls through to route dispatch — never to the next mount. Express's
+`serve-static` chains mounts via `next()`.
+
+```ts
+app.useStaticAssets('/tmp/a', { prefix: '/s' });   // does not contain the file
+app.useStaticAssets('/tmp/b', { prefix: '/s' });   // does
+GET /s/only-here.txt → 404
+```
+
+**Fix.** Make `matchStatic` yield every matching entry (or return an array) and
+have `handle()` walk them until one serves.
+
+### M9 — a malformed JSON body is swallowed instead of rejected with 400 **[confirmed]**
+
+`parseRequestBody()` (`src/http/request.ts:132-152`) catches the parse error and
+returns `NO_BODY`, so `req.body` stays `undefined`:
+
+```
+POST /json  content-type: application/json  body: "{oops"
+→ 201 {"typeof":"undefined"}
+```
+
+`@nestjs/platform-express` (body-parser) answers **400 Bad Request** here.
+As written, a syntax error in the payload surfaces much later as a confusing
+DTO/`ValidationPipe` failure — or, on a route with no validation, as a handler
+reading `undefined`.
+
+**Fix.** Record the parse failure on the request and let the adapter settle a
+400, or rethrow as `BadRequestException`. Keep the tolerant behaviour opt-in if
+back-compat matters.
+
+### L9 — `enableCors()` after `listen()` is a silent no-op **[confirmed]**
+
+`use()` and `useStaticAssets()` both call `reloadRoutes()` when the server is
+already listening. `enableCors()` (`bun-http-adapter.ts:~578`) does not — it
+only sets `this.corsOptions`, so a server already on the native-routes fast path
+keeps serving from a route map that never reaches the CORS branch in `handle()`.
+
+```
+await app.listen(0);
+app.enableCors({ origin: true });
+GET /who (Origin: http://x) → access-control-allow-origin: null
+```
+
+**Fix.** Three lines, identical to `use()`:
+`if (this.httpServer?.listening) this.reloadRoutes();`
+
+### L10 — body and query parsers disagree about duplicate keys **[confirmed]**
+
+`parseQuery()` correctly collects repeats into an array; the urlencoded body
+parser uses `Object.fromEntries(new URLSearchParams(…))`
+(`src/http/request.ts:155`), which keeps only the last:
+
+```
+?a=1&a=2   → req.query = { a: ['1','2'] }
+a=1&a=2    → req.body  = { a: '2' }        ← Express/qs gives ['1','2']
+```
+
+`parseQuery`'s own loop is right there and would fix it.
+
+### L11 — `req.hostname` is wrong for an IPv6 `Host` header **[confirmed]**
+
+`createRequestShim()` (`src/http/request.ts:220`) does
+`hostHeader.split(':', 1)[0]`:
+
+```
+Host: [::1]:1234  →  req.hostname === "["
+```
+
+Strip the brackets first (Express returns `[::1]`).
+
+### L12 — preflight-only CORS headers are emitted on every response
+
+`applyCorsHeaders()` unconditionally sets `access-control-allow-methods` (and
+`access-control-allow-headers` when the request carries
+`access-control-request-headers`) on **all** responses. The `cors` package sets
+those only on a preflight. Confirmed in the M2 probe above: a plain
+`GET /ping` carries `access-control-allow-methods: GET,HEAD,PUT,…`. Harmless to
+browsers, but it is bytes on every response and a visible behavioural
+difference from the Express adapter. Fixing M2 puts the gate in the right place
+to fix this too.
+
+### L13 — `close()` does not await `Bun.serve`'s stop promise
+
+`BunHttpServer.close()` (`src/http/server.ts:195`) calls `this.bunServer?.stop()`
+and resolves immediately. On Bun 1.4 `stop()` **returns a Promise** (verified:
+`server.stop(true).constructor.name === 'Promise'`).
+
+Measured: an in-flight 700 ms request *does* still complete (Bun's non-forced
+stop drains), but `app.close()` resolves after ~1 ms — before the server is
+actually down. Anything that shuts the process down right after `await
+app.close()` can cut those connections. Also, `stop()` is never called with
+`true`, so there is no way for a caller to force-close.
+
+**Fix.** `await this.bunServer.stop()`; optionally expose a `force` flag.
+
+### L14 — the native fast path bypasses `setErrorHandler()`
+
+`runRouteChain()` (slow path) routes a handler error through
+`this.errorHandler` when one is registered. `invokeSingle()` /
+`runBunRouteChain()` (fast path) go straight to `res._reject(err)`. Nest
+registers an error handler during `init()`, so this is a genuine fast-path vs
+slow-path divergence — the same class the previous audit's cross-cutting
+recommendation was written to prevent. Low impact only because Nest's own
+router proxy catches almost everything before it escapes.
+
+---
+
+## Part 3 — Bun 1.4.x changelog, mapped onto this adapter
+
+CI pins **1.4.0**; the current release is **1.4.2** (2026-09-05).
+
+**1.4.0** (already exploited): `{ dir }` routes with `sendfile`,
+`Content-Type` / `ETag` / `Last-Modified` / `304` / `Range` handled natively —
+this is what `useStaticAssets({ native: true })` rides on. Also landed:
+native `ReadableStream`/`CompressionStream`, automatic backpressure on
+streamed response bodies, 13-48 % lower HTTP-server memory.
+
+**1.4.1** — four fixes land directly on adapter surface:
+
+* *"handlers returning promises that never settle leaving requests in
+  `server.pendingRequests`"* — same class as H1, though the fix is counter
+  bookkeeping, not a runtime timeout for such handlers. Worth re-running the H1
+  regression suite on 1.4.1+.
+* *multiple `server.upgrade()` bugs (connection handling, microtask execution)*
+  — the shared-port WS path calls `server.upgrade()` from inside both
+  dispatchers; these fixes are relevant to it.
+* *malformed `Range` header acceptance* and *`Bun.file().slice()` sending
+  incorrect bytes* — both on the native static path.
+* `Bun.serve` gained **HTTP/2 on the same port** via `http2: true`
+  (WebSockets not yet supported over it).
+
+**1.4.2** — fixes an **`AsyncLocalStorage` memory leak** regression from 1.4.1.
+ALS is what CLS and tracing integrations (`nestjs-cls`, OpenTelemetry, pino's
+async context) sit on, so this one matters for long-running apps. (Nest's own
+request-scoped providers use `ContextIdFactory`, not ALS — they are unaffected.)
+
+**Recommendation:** add 1.4.2 to the CI matrix alongside the pinned 1.4.0, and
+re-run `_probe` H6 there before filing upstream.
+
+---
+
+## Part 4 — Bun capabilities the adapter does not use yet
+
+All verified present on the installed Bun 1.4.0.
+
+**Server options never surfaced** (`Bun.serve`, `bun-types/serve.d.ts:672-774`):
+
+| Option | Why it matters here |
+|---|---|
+| `idleTimeout` | **H4** — 10 s default silently kills SSE; capped at 255 s, so it is a mitigation for slow uploads, not the SSE fix |
+| `maxRequestBodySize` | 128 MB default; the *only* real pre-buffer guard available for **M6** uploads |
+| `reusePort` | multi-process scaling (`SO_REUSEPORT`) — the cheapest throughput win the adapter could offer |
+| `ipv6Only`, `development` | completeness |
+| `id` | preserves the server instance across `bun --hot` reloads (`null` disables) |
+| `http2: true` | 1.4.1+, same port as HTTP/1.1 |
+
+**Per-request:** `server.timeout(req, seconds)` — the targeted fix for **H4**
+without changing the global timeout.
+
+**Cookies:** Bun routes hand back a native `CookieMap` on `req.cookies`
+(verified: `cookie: 'a=1; b=2'` → `[['a','1'],['b','2']]`), and `Bun.Cookie` /
+`Bun.CookieMap` can serialise `Set-Cookie` — including `Expires`, which **L8**
+is missing. Only a partial replacement: signed cookies still need
+`parseCookies()`.
+
+**Observability:** `server.pendingRequests`, `server.pendingWebSockets`,
+`server.subscriberCount(topic)` — a `@nestjs/terminus`-style health indicator
+could expose all three for free. Nothing in the adapter reads them.
+
+**WebSocket options, none of which the adapter exposes** (`serve.d.ts:432-475`):
+`perMessageDeflate`, `maxPayloadLength`, `backpressureLimit`,
+`closeOnBackpressureLimit`, `idleTimeout`, `sendPings`, `publishToSelf`, plus
+the `ping` / `pong` handlers. `sendPings` + `ping`/`pong` are the practical
+answer to the dead `__onError` path in **L4**: heartbeats detect a broken peer
+that never sends a close frame.
+
+**Compression:** the adapter has **no compression story at all** — no `gzip` /
+`br` / `zstd` on any response path. Bun 1.4 ships native `CompressionStream`
+(gzip, deflate, deflate-raw, brotli, zstd), so a `content-encoding` negotiation
+step in `reply()` would be a small, self-contained addition.
+
+**Also unused:** `routes` accepts a bare `Response` object for a static
+endpoint (zero-allocation health checks, `robots.txt`), and `Response.clone()`
+now shares body chunks.
+
+---
+
+## Ranked fix order
+
+| # | Finding | Why |
+|---|---|---|
+| ~~1~~ | ~~**H4** SSE dies at 10 s~~ | **FIXED 2026-09-06** |
+| ~~2~~ | ~~**H5** CORS `origin` callback~~ | **FIXED 2026-09-06** |
+| 3 | **M9 / M2** 400 on bad JSON, preflight gate | both are Express-contract divergences an app will hit early |
+| 4 | **H6** invisible mid-stream failure | correct the comment now; upstream repro on 1.4.2 |
+| 5 | **M7 / M8** classic static decode + mount chaining | same-file reachable in one mode, not the other |
+| 6 | **L9 / L10 / L11 / L13** | each is a handful of lines |
+| 7 | Part 4 opt-ins (`idleTimeout`, `maxRequestBodySize`, `reusePort`, compression) | feature work, not defects |
+
+**Docs gap:** closed alongside the fixes — `docs/streaming-and-sse.md` now
+explains the idle timer and the per-request opt-out, and `docs/http.md`
+documents both `origin` function shapes and the synchronous-callback
+requirement.
+
+**Cross-cutting:** the previous audit's recommendation held up — the
+fast-path/slow-path parameterised specs caught the whole H2/M3/M1 class, and
+nothing in that family regressed. The two divergences that remain (**L9**
+CORS-after-listen, **L14** error handler) are both *state-transition* cases, not
+per-request ones: the existing matrix runs each dispatcher, but never flips an
+app from one to the other after `listen()`. Extending the helper to do that
+would close the gap mechanically.

@@ -412,6 +412,11 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       body instanceof Blob ||
       body instanceof ReadableStream
     ) {
+      // A handler can hand back a web stream directly, bypassing both the
+      // writable shim and `streamNodeReadable` — it still needs the idle timer
+      // off, or Bun cuts it after 10 s of quiet. `Uint8Array`/`ArrayBuffer`/
+      // `Blob` are complete data; only the stream can sit idle.
+      if (body instanceof ReadableStream) response._disableIdleTimeout?.();
       response.body = body;
       response.finished = true;
       response.headersSent = true;
@@ -649,16 +654,20 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     const m = req.method;
     // Hot path: GET/HEAD without body parser — skip the async wrapper entirely.
     if (m === 'GET' || m === 'HEAD' || !this.shimCtx.bodyParserEnabled) {
-      return this.invokeSingle(req, handler);
+      return this.invokeSingle(req, handler, server);
     }
     return maybeParseBody(req, bunReq, this.shimCtx).then(() =>
-      this.invokeSingle(req, handler),
+      this.invokeSingle(req, handler, server),
     );
   }
 
-  private invokeSingle(req: BunRequest, handler: BunRouteHandler): Promise<Response> {
+  private invokeSingle(
+    req: BunRequest,
+    handler: BunRouteHandler,
+    server?: BunServer,
+  ): Promise<Response> {
     return new Promise<Response>(resolve => {
-      const res = makeBunResponse(this, req, resolve);
+      const res = makeBunResponse(this, req, resolve, server);
       try {
         const ret = handler(req, res, () => {
           if (!res.finished) this.dispatchNotFound(req, res);
@@ -688,7 +697,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     const req = buildNativeRouteRequest(bunReq, this.shimCtx, server);
     await maybeParseBody(req, bunReq, this.shimCtx);
     return new Promise<Response>(resolve => {
-      const res = makeBunResponse(this, req, resolve);
+      const res = makeBunResponse(this, req, resolve, server);
       let idx = 0;
       const step = (err?: unknown) => {
         if (err) return res._reject(err);
@@ -762,7 +771,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     );
 
     return new Promise<Response>(resolve => {
-      const res = makeBunResponse(this, req, resolve);
+      const res = makeBunResponse(this, req, resolve, bunServer);
 
       if (this.corsOptions) {
         applyCorsHeaders(req, res, this.corsOptions);

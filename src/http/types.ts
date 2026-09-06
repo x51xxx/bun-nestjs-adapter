@@ -3,6 +3,17 @@ import type { Server } from 'bun';
 /** The Bun.serve instance type with our per-socket upgrade payload. */
 export type BunServer = Server<WsUpgradeData>;
 
+/**
+ * The one `Bun.serve` capability the response shim needs: resetting a single
+ * request's idle timer. Structural (like `RequestIpSource` in `http/request.ts`)
+ * so `http/` never has to name the concrete server type — a real `BunServer`
+ * satisfies it, and test doubles can pass `undefined`.
+ */
+export interface RequestTimeoutSource {
+  /** Seconds of inactivity before Bun closes the connection. `0` = never. */
+  timeout(request: Request, seconds: number): void;
+}
+
 export interface BunRequest {
   method: string;
   url: string;
@@ -64,6 +75,16 @@ export interface BunResponse {
    * alternate response factories) keep compiling — absent is read as `false`.
    */
   readonly _streaming?: boolean;
+  /**
+   * Opt this request out of `Bun.serve`'s idle timer (10 s by default, capped
+   * at 255 s, so it cannot simply be raised for a long-lived stream). Called
+   * whenever the response turns into a stream — an SSE feed with a gap between
+   * events, or a slow `StreamableFile` — otherwise Bun closes the connection
+   * mid-stream. No-op when the response was built without a server handle.
+   *
+   * Optional so externally-constructed `BunResponse` objects keep compiling.
+   */
+  _disableIdleTimeout?(): void;
   _resolve: (response: Response) => void;
   _reject: (err: unknown) => void;
   req: BunRequest;

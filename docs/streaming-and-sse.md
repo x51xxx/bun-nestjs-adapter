@@ -31,6 +31,13 @@ response unless you've already set them. A bare `Readable` defaults to
 request bridges Bun's `AbortSignal` to a `'close'` event, so Nest core's
 `RouterResponseController.sse()` drives it exactly as on Express.
 
+`Bun.serve` closes a connection after `idleTimeout` seconds without traffic — 10
+by default, and the option is capped at 255, so it can't simply be raised for a
+feed that is *meant* to be quiet between events. The adapter therefore calls
+`server.timeout(request, 0)` the moment a response turns into a stream (SSE,
+`StreamableFile`, a bare `Readable`), which opts that one request out of the
+timer. No heartbeat is required to keep an idle stream alive.
+
 ```ts
 import { Controller, Sse, MessageEvent } from '@nestjs/common';
 import { interval, map, Observable } from 'rxjs';

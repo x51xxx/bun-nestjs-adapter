@@ -5,6 +5,7 @@ import {
   BunResponse,
   BunResponseHeaders,
   CookieOptions,
+  RequestTimeoutSource,
   ResponseAdapter,
 } from './types';
 
@@ -64,8 +65,24 @@ export function makeBunResponse(
   adapter: ResponseAdapter,
   req: BunRequest,
   resolve: (r: Response) => void,
+  server?: RequestTimeoutSource,
 ): BunResponse {
   const state: ResponseState = { settled: false, streamCtrl: null, discarded: false };
+  /**
+   * `Bun.serve` closes a connection after `idleTimeout` seconds without
+   * traffic — 10 by default, and the option is capped at 255, so raising it
+   * globally is not an answer for a stream that is *meant* to sit idle between
+   * events. `server.timeout(req, 0)` opts this one request out.
+   *
+   * Bun throws if the request is no longer tracked (already settled, client
+   * gone), which is a no-op for us, hence the swallow.
+   */
+  const disableIdleTimeout = () => {
+    if (!server) return;
+    try {
+      server.timeout(req.bunRequest, 0);
+    } catch {}
+  };
   // Every exit point goes through here, so the response can only settle once.
   const settle = (r: Response) => {
     if (state.settled) return;
@@ -83,11 +100,22 @@ export function makeBunResponse(
       return state.streamCtrl !== null;
     },
     _resolve: settle,
+    _disableIdleTimeout: disableIdleTimeout,
     _reject(err: unknown) {
       // Already streaming: the status line and headers are on the wire, so a
-      // 500 body is no longer possible. Erroring the stream aborts the chunked
-      // response, which is the only way left to tell the client it failed —
-      // and, critically, it terminates the request instead of hanging it.
+      // 500 body is no longer possible. Erroring the controller is what keeps
+      // this from hanging — it settles the request instead of leaving the
+      // per-request promise pending forever, which is the whole point.
+      //
+      // What it does NOT do, contrary to what this comment used to claim, is
+      // tell the client anything. Measured on Bun 1.4.0 (AUDIT.md H6): after
+      // `.error()` Bun still finishes the response cleanly — a small body comes
+      // back as `200` with a matching `Content-Length`, and a flushed chunked
+      // one gets its terminating `0\r\n\r\n`. A truncated payload is therefore
+      // indistinguishable from a complete one on the wire, and there is no
+      // socket handle reachable from a `Response(stream)` body to abort with.
+      // A handler that can fail mid-stream has to signal that in-band (for
+      // `@Sse()`, a terminal `event: error` frame before it throws).
       if (state.streamCtrl) {
         this.finished = true;
         try {
@@ -192,7 +220,7 @@ export function makeBunResponse(
       return this.cookie(name, '', opts);
     },
   };
-  attachWritableShim(res, state, settle);
+  attachWritableShim(res, state, settle, disableIdleTimeout);
   return res;
 }
 
@@ -248,6 +276,7 @@ function attachWritableShim(
   res: BunResponse,
   state: ResponseState,
   settle: (r: Response) => void,
+  disableIdleTimeout: () => void,
 ): void {
   const emitter = new EventEmitter();
 
@@ -270,6 +299,10 @@ function attachWritableShim(
       });
       return;
     }
+    // An SSE feed is idle *by design* between events, and Bun's 10 s default
+    // idleTimeout would close it mid-stream. Opt out before handing Bun the
+    // stream, while the request is still tracked.
+    disableIdleTimeout();
     // `start` runs synchronously inside the constructor, so `state.streamCtrl`
     // is populated before we settle — `_reject` can rely on it immediately.
     const stream = new ReadableStream<Uint8Array>({

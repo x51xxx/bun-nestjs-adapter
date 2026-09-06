@@ -58,6 +58,10 @@ export function streamNodeReadable(response: BunResponse, nodeStream: Readable):
   } else {
     webStream = nodeReadableToWeb(nodeStream);
   }
+  // Same idle-timer opt-out the writable shim performs on `write()`: a Node
+  // stream can sit quiet between chunks (a slow producer, a throttled file),
+  // and Bun's default 10 s idleTimeout would cut the response mid-body.
+  response._disableIdleTimeout?.();
   response.body = webStream;
   response.finished = true;
   response.headersSent = true;
