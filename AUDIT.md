@@ -311,7 +311,7 @@ the full body.
 GET /opt → 404 Cannot GET /opt
 ```
 
-## L2 — `compilePath` mangles multi-param segments
+## L2 — `compilePath` mangles multi-param segments · **FIXED**
 
 `/x/:a-:b` → one group with key name `"a-:b"`. Unit-level only; not confirmed that
 Nest emits this shape.
@@ -322,7 +322,7 @@ Nest emits this shape.
 (H1a). So `res.write('a'); return {...}` calls `_resolve()` on a settled promise —
 the JSON is discarded with no error. Same class as H1.
 
-## L4 — WebSocket `error` events are dead code
+## L4 — WebSocket `error` events are dead code · **FIXED**
 
 Neither `STANDALONE_WEBSOCKET_HANDLERS` (`bun-ws-adapter.ts:160`) nor the
 shared-port handlers in `http/server.ts:97-120` register Bun's `error` callback,
@@ -336,7 +336,7 @@ and nothing ever calls `client.__onError`. So `bindErrorHandler()`'s
 keeps `bunServer === null`, and `BunWsServer.publish()` returns `0` silently.
 Same freeze-at-boot class as the documented lazy-route limitation.
 
-## L6 — Dead code
+## L6 — Dead code · **FIXED (partly)**
 
 * `ServerEntry.serverEmitter` (`bun-ws-adapter.ts:29`) — assigned, never read.
 * `CompiledRoute.isMiddleware` / the `route.method === 'USE'` branch in
@@ -351,7 +351,7 @@ fast path uses Bun's native matcher, so this only bites apps that use middleware
 which, given H2/M3/M4, is exactly the population that already gets degraded
 behaviour. A method-bucketed index (the `byPath` map already exists) would cut it.
 
-## L8 — Cookies: `maxAge` doesn't imply `Expires`
+## L8 — Cookies: `maxAge` doesn't imply `Expires` · **FIXED**
 
 `res.cookie(name, val, { maxAge })` emits only `Max-Age`
 (`response.ts:127-129`). Express emits both for IE/legacy-proxy compatibility.
@@ -789,7 +789,7 @@ written as `BunFileInterceptor('f') + BunFilesInterceptor('g')`, which is now a
 one over a matching form instead, which still exercises the memoisation it was
 written for.
 
-### L9 — `enableCors()` after `listen()` is a silent no-op **[confirmed]**
+### L9 — `enableCors()` after `listen()` is a silent no-op **[confirmed]** · **FIXED**
 
 `use()` and `useStaticAssets()` both call `reloadRoutes()` when the server is
 already listening. `enableCors()` (`bun-http-adapter.ts:~578`) does not — it
@@ -805,7 +805,7 @@ GET /who (Origin: http://x) → access-control-allow-origin: null
 **Fix.** Three lines, identical to `use()`:
 `if (this.httpServer?.listening) this.reloadRoutes();`
 
-### L10 — body and query parsers disagree about duplicate keys **[confirmed]**
+### L10 — body and query parsers disagree about duplicate keys **[confirmed]** · **FIXED**
 
 `parseQuery()` correctly collects repeats into an array; the urlencoded body
 parser uses `Object.fromEntries(new URLSearchParams(…))`
@@ -818,7 +818,7 @@ a=1&a=2    → req.body  = { a: '2' }        ← Express/qs gives ['1','2']
 
 `parseQuery`'s own loop is right there and would fix it.
 
-### L11 — `req.hostname` is wrong for an IPv6 `Host` header **[confirmed]**
+### L11 — `req.hostname` is wrong for an IPv6 `Host` header **[confirmed]** · **FIXED**
 
 `createRequestShim()` (`src/http/request.ts:220`) does
 `hostHeader.split(':', 1)[0]`:
@@ -848,7 +848,7 @@ go on both. One existing test (`audit-fixes.spec.ts`, "exposedHeaders + maxAge
 are emitted") had encoded the bug by asserting `Max-Age` on a plain `GET`; it
 now asserts the split.
 
-### L13 — `close()` does not await `Bun.serve`'s stop promise
+### L13 — `close()` does not await `Bun.serve`'s stop promise · **FIXED**
 
 `BunHttpServer.close()` (`src/http/server.ts:195`) calls `this.bunServer?.stop()`
 and resolves immediately. On Bun 1.4 `stop()` **returns a Promise** (verified:
@@ -862,7 +862,7 @@ app.close()` can cut those connections. Also, `stop()` is never called with
 
 **Fix.** `await this.bunServer.stop()`; optionally expose a `force` flag.
 
-### L14 — the native fast path bypasses `setErrorHandler()`
+### L14 — the native fast path bypasses `setErrorHandler()` · **FIXED**
 
 `runRouteChain()` (slow path) routes a handler error through
 `this.errorHandler` when one is registered. `invokeSingle()` /
@@ -978,3 +978,47 @@ CORS-after-listen, **L14** error handler) are both *state-transition* cases, not
 per-request ones: the existing matrix runs each dispatcher, but never flips an
 app from one to the other after `listen()`. Extending the helper to do that
 would close the gap mechanically.
+
+---
+
+## L-series — what shipped, 2026-09-06
+
+Nine of the ten. **L7** (O(routes) matching) is the exception and is handled
+separately; every behaviour below that has an Express counterpart was read off a
+real `@nestjs/platform-express` app before it was written.
+
+* **L2** — `compilePath()` now tokenises a segment that mixes params with
+  literals: `/x/:a-:b`, `/v:major.:minor`. Groups are greedy, which is what
+  path-to-regexp produces — `/x/foo-bar-baz` gives `a='foo-bar'`, `b='baz'`
+  (measured, not assumed). `bunRoutesLoseParams()` widened from
+  `startsWith(':')` to `includes(':')`, because Bun's matcher doesn't understand
+  these either: `/v:major.:minor` matched *nothing* on 1.4.0, so the path has to
+  fall through to our own compiler.
+* **L4** — the finding's suggested fix was impossible (Bun's `WebSocketHandler`
+  has no `error` callback), so the event is derived instead: a close with a code
+  outside 1000/1001/1005 raises `'error'` on the client and the server before
+  the close is delivered. Both dispatch paths do it through one
+  `emitAbnormalClose()`. Node's EventEmitter *throws* an unhandled `'error'` —
+  which inside a Bun close callback would take down the teardown — so it only
+  emits where something is listening. Found by the test, not by reading.
+* **L6** — `CompiledRoute.isMiddleware`, the unreachable `'USE'` branch in
+  `collect()`, and `ServerEntry.serverEmitter` are gone. `res.body` stays: the
+  audit is right that only tests read it, but it is a declared field on the
+  published `BunResponse`, and removing public API to save one assignment is a
+  worse trade than keeping it.
+* **L8** — `maxAge` now emits `Expires` as well, and *overrides* an explicit
+  `expires`, which is what Express does (measured: `{ maxAge: 60_000, expires:
+  <2030> }` comes back with an expiry 60 s out, not 2030).
+* **L9** — `enableCors()` calls `reloadRoutes()` when the server is already
+  listening, the same live rebuild `use()` and `useStaticAssets()` do.
+* **L10** — the urlencoded body parser uses `parseQuery()` instead of
+  `Object.fromEntries`, so `a=1&a=2` is `['1','2']` in the body exactly as it
+  already was in the query string.
+* **L11** — `Host: [::1]:1234` yields `[::1]`, brackets kept, matching Express.
+* **L13** — `close()` awaits `stop()`'s promise (and gained a `force` flag for
+  `stop(true)`). A test holds a 300 ms request open and asserts `close()` takes
+  longer than 150 ms; before, it returned in about one.
+* **L14** — `invokeSingle()` and `runBunRouteChain()` route errors through the
+  same `dispatchError()` the manual dispatcher uses. Two bugs, not one: the
+  fast path went straight to `_reject`, *and* `invokeSingle`'s `next` ignored
+  its error argument entirely, turning `next(err)` into a 404.

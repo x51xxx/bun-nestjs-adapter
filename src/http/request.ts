@@ -53,6 +53,21 @@ export function makeNoopSocket(emitter: EventEmitter) {
   };
 }
 
+/**
+ * Strip the port from a `Host` header. An IPv6 literal is bracketed
+ * (`[::1]:3000`), so splitting on the first `:` returned `'['`; Express keeps
+ * the brackets and returns `[::1]`.
+ */
+function hostnameOf(host: string): string {
+  if (host.charCodeAt(0) === 0x5b) {
+    // 0x5b = '['
+    const end = host.indexOf(']');
+    return end === -1 ? host : host.slice(0, end + 1);
+  }
+  const colon = host.indexOf(':');
+  return colon === -1 ? host : host.slice(0, colon);
+}
+
 /** Adapter state the request builders need — passed by value, no class coupling. */
 export interface RequestShimContext {
   bodyParserEnabled: boolean;
@@ -211,10 +226,11 @@ export async function parseRequestBody(
     }
   }
   if (contentType.includes('application/x-www-form-urlencoded')) {
-    return {
-      body: Object.fromEntries(new URLSearchParams(buf.toString('utf8'))),
-      rawBody: buf,
-    };
+    // `parseQuery` rather than `Object.fromEntries`: the latter keeps only the
+    // last value, so `a=1&a=2` collapsed to `'2'` in the body while the query
+    // string parser — right here in this file — correctly produced `['1','2']`.
+    // Express (via qs) gives the array; the two parsers now agree.
+    return { body: parseQuery(buf.toString('utf8')), rawBody: buf };
   }
   if (contentType.startsWith('text/')) {
     return { body: buf.toString('utf8'), rawBody: buf };
@@ -297,7 +313,7 @@ function createRequestShim(
   server: RequestIpSource | undefined,
 ): BunRequest {
   const hostHeader = headers['host'];
-  const hostname = hostHeader ? hostHeader.split(':', 1)[0] : '';
+  const hostname = hostHeader ? hostnameOf(hostHeader) : '';
   const parsedCookies = parseCookies(headers['cookie'], ctx.cookieSecret);
   const ipGetter = makeIpGetter(raw, headers, ctx, server);
 

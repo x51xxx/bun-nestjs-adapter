@@ -5,6 +5,7 @@ import { MessageMappingProperties } from '@nestjs/websockets/gateway-metadata-ex
 import type { ServerWebSocket, WebSocketHandler } from 'bun';
 import { EMPTY, Observable, fromEvent } from 'rxjs';
 import { filter, first, mergeMap, share, takeUntil } from 'rxjs/operators';
+import { emitAbnormalClose } from '../http/server';
 import { BunServer, WsUpgradeData } from '../http/types';
 
 const CLOSE_EVENT = 'close';
@@ -26,7 +27,6 @@ type BunWsAdapterOptions = {
 interface ServerEntry {
   port: number;
   bunServer: BunServer | null;
-  serverEmitter: BunWsServer;
   paths: Map<string, BunWsServer>;
 }
 
@@ -174,6 +174,8 @@ const STANDALONE_WEBSOCKET_HANDLERS: WebSocketHandler<WsUpgradeData> = {
     const { client, server } = ws.data;
     if (!client) return;
     server?.clients.delete(client);
+    // Bun exposes no `error` callback; see emitAbnormalClose().
+    emitAbnormalClose(client, server, code, reason);
     client.__onClose(code, reason);
   },
   drain: () => {},
@@ -284,12 +286,7 @@ export class BunWsAdapter extends AbstractWsAdapter<BunWsServer, BunWsClient> {
     if (typeof Bun === 'undefined' || typeof Bun.serve !== 'function') {
       throw new Error('Bun runtime not detected. BunWsAdapter requires the Bun runtime.');
     }
-    const entry: ServerEntry = {
-      port,
-      bunServer: null,
-      serverEmitter: new BunWsServer('*'),
-      paths: new Map(),
-    };
+    const entry: ServerEntry = { port, bunServer: null, paths: new Map() };
 
     const config = {
       port,

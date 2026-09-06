@@ -6,7 +6,6 @@ export interface CompiledRoute {
   regexp: RegExp;
   keys: { name: string }[];
   handler: BunRouteHandler;
-  isMiddleware: boolean;
 }
 
 export class BunRouterInstance {
@@ -24,15 +23,7 @@ export class BunRouterInstance {
   add(method: string, path: string, handler: BunRouteHandler) {
     const upper = method.toUpperCase();
     const { regexp, keys } = compilePath(path);
-    this.routes.push({
-      method: upper,
-      rawPath: path,
-      regexp,
-      keys,
-      handler,
-      isMiddleware: upper === 'USE',
-    });
-    if (upper === 'USE') return;
+    this.routes.push({ method: upper, rawPath: path, regexp, keys, handler });
     let bucket = this.byPath.get(path);
     if (!bucket) {
       bucket = new Map();
@@ -65,8 +56,7 @@ export class BunRouterInstance {
   private collect(upper: string, pathname: string) {
     const matches: { route: CompiledRoute; params: Record<string, string> }[] = [];
     for (const route of this.routes) {
-      if (route.method !== upper && route.method !== 'ALL' && route.method !== 'USE')
-        continue;
+      if (route.method !== upper && route.method !== 'ALL') continue;
       const m = route.regexp.exec(pathname);
       if (!m) continue;
       let params: Record<string, string>;
@@ -136,12 +126,13 @@ export function compilePath(path: string): {
   // Each part carries its own leading '/' so an optional wildcard can swallow
   // the separator too (`/a/{*rest}` has to match a bare `/a`).
   const parts = segments.map(seg => {
-    if (seg.startsWith(':')) {
-      const name = seg.slice(1).replace(/[?(].*$/, '');
-      keys.push({ name });
+    // A segment that is *nothing but* one param — by far the common case.
+    const whole = WHOLE_PARAM.exec(seg);
+    if (whole) {
+      keys.push({ name: whole[1] });
       // A trailing `?` marks the param optional (`/opt/:id?` must also match
       // `/opt`), so the separator goes inside the optional group.
-      return seg.endsWith('?') ? '(?:/([^/]+))?' : '/([^/]+)';
+      return whole[3] ? '(?:/([^/]+))?' : '/([^/]+)';
     }
     // path-to-regexp v8 / Nest 11 named wildcards. `{*name}` is the optional
     // form (matches zero or more segments), `*name` the required one. Nest
@@ -159,7 +150,14 @@ export function compilePath(path: string): {
     if (seg === '*' || seg === '(.*)') {
       return '/.*';
     }
-    return '/' + seg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Several params in one segment, with literal separators between them:
+    // `/x/:a-:b`, `/v:major.:minor`. path-to-regexp handles these and so does
+    // Nest, but this used to fall through to the escape branch below and match
+    // the literal text `:a-:b`.
+    if (seg.includes(':')) {
+      return '/' + compileMixedSegment(seg, keys);
+    }
+    return '/' + escapeLiteral(seg);
   });
   const regexp = new RegExp('^' + parts.join('') + '/?$');
   return { regexp, keys };
@@ -167,6 +165,42 @@ export function compilePath(path: string): {
 
 const OPTIONAL_WILDCARD = /^\{\*([A-Za-z0-9_$]+)\}$/;
 const NAMED_WILDCARD = /^\*([A-Za-z0-9_$]+)$/;
+/** `:name`, optionally with a `(pattern)` and/or a trailing `?`, and nothing else. */
+const WHOLE_PARAM = /^:([A-Za-z0-9_$]+)(\([^)]*\))?(\?)?$/;
+/** The same, at the current position inside a longer segment. */
+const PARAM_AT = /^:([A-Za-z0-9_$]+)(\([^)]*\))?/;
+
+function escapeLiteral(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Compile a segment that mixes params with literal text, e.g. `:a-:b` or
+ * `v:major.:minor`. Groups are greedy, which is what path-to-regexp produces:
+ * `/x/foo-bar-baz` against `/x/:a-:b` yields `a = 'foo-bar'`, `b = 'baz'`
+ * (verified against @nestjs/platform-express).
+ *
+ * An inline `(pattern)` is consumed but not enforced, matching what the
+ * whole-segment branch does with it.
+ */
+function compileMixedSegment(seg: string, keys: { name: string }[]): string {
+  let out = '';
+  let i = 0;
+  while (i < seg.length) {
+    if (seg[i] === ':') {
+      const param = PARAM_AT.exec(seg.slice(i));
+      if (param) {
+        keys.push({ name: param[1] });
+        out += '([^/]+)';
+        i += param[0].length;
+        continue;
+      }
+    }
+    out += escapeLiteral(seg[i]);
+    i++;
+  }
+  return out;
+}
 
 /**
  * True when Bun's native matcher can't faithfully destructure the path. Bun
@@ -188,7 +222,10 @@ const NAMED_WILDCARD = /^\*([A-Za-z0-9_$]+)$/;
 export function bunRoutesLoseParams(path: string): boolean {
   if (NAMED_WILDCARD_ANYWHERE.test(path)) return true;
   for (const seg of path.split('/')) {
-    if (seg.startsWith(':') && !BARE_PARAM.test(seg)) return true;
+    // Not just `startsWith(':')`: a segment that merely *contains* a param
+    // (`v:major.:minor`) is one Bun's matcher does not understand either — it
+    // matched nothing at all when tested on 1.4.0.
+    if (seg.includes(':') && !BARE_PARAM.test(seg)) return true;
   }
   return false;
 }

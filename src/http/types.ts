@@ -146,6 +146,9 @@ export interface WsClientShim {
   __markOpen(): void;
   __onMessage(data: string | Buffer): void;
   __onClose(code?: number, reason?: string): void;
+  __onError(err: unknown): void;
+  /** EventEmitter's, used to avoid emitting `'error'` into the void. */
+  listenerCount?(event: string): number;
 }
 
 export interface WsServerShim {
@@ -154,6 +157,8 @@ export interface WsServerShim {
   clients: Set<WsClientShim>;
   clientClass: new (ws: null) => WsClientShim;
   emit(event: string, ...args: unknown[]): boolean;
+  /** EventEmitter's, used to avoid emitting `'error'` into the void. */
+  listenerCount?(event: string): number;
 }
 
 /** Per-socket payload attached at `server.upgrade(req, { data })` time. */

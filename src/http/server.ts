@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import { promises as fs } from 'fs';
 import type { ServerWebSocket, WebSocketHandler } from 'bun';
-import { BunServer, WsUpgradeData } from './types';
+import { BunServer, WsClientShim, WsServerShim, WsUpgradeData } from './types';
 
 /**
  * TLS options forwarded verbatim to `Bun.serve({ tls })`. Mirrors Bun's
@@ -62,6 +62,48 @@ function getBunServe(): typeof Bun.serve | undefined {
   return typeof Bun === 'undefined' ? undefined : Bun.serve;
 }
 
+/**
+ * Close codes that mean "this ended the way it was supposed to": 1000 normal,
+ * 1001 going away, 1005 no status received (what a clean close with no code
+ * reports). Everything else is a protocol or transport failure.
+ */
+const NORMAL_CLOSE_CODES = new Set([1000, 1001, 1005]);
+
+/**
+ * Bun's `WebSocketHandler` has **no** `error` callback — the full set is
+ * open/message/close/drain/ping/pong — so a failed socket only ever surfaces as
+ * a close with an abnormal code. Deriving the `'error'` event from that is what
+ * makes `AbstractWsAdapter.bindErrorHandler()` (and any gateway listening for
+ * `'error'`) able to fire at all; before this the handler was registered
+ * against an event nothing could emit.
+ *
+ * Emitted before `__onClose` so a listener sees the cause ahead of the close.
+ */
+export function emitAbnormalClose(
+  client: WsClientShim,
+  server: WsServerShim | undefined,
+  code: number,
+  reason: string,
+): void {
+  if (NORMAL_CLOSE_CODES.has(code)) return;
+  const err = new Error(
+    `WebSocket closed abnormally (code ${code}${reason ? `: ${reason}` : ''})`,
+  );
+  // Node's EventEmitter *throws* an unhandled `'error'`, which inside a Bun
+  // close callback would take down the connection teardown. Emit only where
+  // somebody is listening.
+  if (hasErrorListener(client)) client.__onError(err);
+  if (server && hasErrorListener(server)) server.emit('error', err);
+}
+
+function hasErrorListener(target: {
+  listenerCount?(event: string): number;
+}): boolean {
+  return typeof target.listenerCount === 'function'
+    ? target.listenerCount('error') > 0
+    : false;
+}
+
 export class BunHttpServer extends EventEmitter {
   public listening = false;
   /** Underlying Bun.serve instance — read by BunWsAdapter for pub/sub. */
@@ -119,6 +161,7 @@ export class BunHttpServer extends EventEmitter {
             const server = ws.data?.server;
             if (client) {
               server?.clients.delete(client);
+              emitAbnormalClose(client, server, code, reason);
               client.__onClose(code, reason);
             }
           },
@@ -184,29 +227,37 @@ export class BunHttpServer extends EventEmitter {
     };
   }
 
-  close(cb?: (err?: Error) => void) {
+  /**
+   * Stop listening. `Bun.serve`'s `stop()` returns a promise that settles once
+   * in-flight requests have drained; it used to be called and dropped, so
+   * `app.close()` resolved while the server was still finishing responses and
+   * anything exiting the process right after could cut them off.
+   *
+   * `force` maps to `stop(true)`, which closes active connections instead of
+   * waiting for them.
+   */
+  close(cb?: (err?: Error) => void, force = false) {
     const done = (err?: Error) => {
       this.listening = false;
       this.emit('close');
       cb?.(err);
     };
 
-    try {
-      this.bunServer?.stop();
-      if (this.boundUnixPath) {
-        fs.unlink(this.boundUnixPath)
-          .then(() => done())
-          // The socket file already being gone (e.g. removed by Bun on stop,
-          // or never created) is a successful teardown, not an error.
-          .catch((err: NodeJS.ErrnoException) =>
-            done(err?.code === 'ENOENT' ? undefined : err),
-          );
-      } else {
-        done();
+    const unlinkSocket = async () => {
+      if (!this.boundUnixPath) return;
+      try {
+        await fs.unlink(this.boundUnixPath);
+      } catch (err) {
+        // The socket file already being gone (e.g. removed by Bun on stop, or
+        // never created) is a successful teardown, not an error.
+        if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
       }
-    } catch (err) {
-      done(err as Error);
-    }
+    };
+
+    Promise.resolve(this.bunServer?.stop(force))
+      .then(unlinkSocket)
+      .then(() => done())
+      .catch(err => done(err as Error));
     return this;
   }
 }

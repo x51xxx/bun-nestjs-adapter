@@ -593,6 +593,13 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
 
   public enableCors(options?: CorsOptions, _prefix?: string) {
     this.corsOptions = options ?? {};
+    // CORS forces the manual dispatcher, so a server already serving from the
+    // native route map has to be moved off it — the same live rebuild `use()`
+    // and `useStaticAssets()` do. Without this, `enableCors()` after `listen()`
+    // set the options and changed nothing observable.
+    if (this.httpServer?.listening) {
+      this.reloadRoutes();
+    }
   }
 
   /**
@@ -676,14 +683,22 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     return new Promise<Response>(resolve => {
       const res = makeBunResponse(this, req, resolve, server);
       try {
-        const ret = handler(req, res, () => {
+        const ret = handler(req, res, (err?: unknown) => {
+          // `next(err)` used to be swallowed here — the argument was ignored
+          // and the request fell through to a 404. The manual dispatcher has
+          // always routed it to the error handler; now both do.
+          if (err) return this.dispatchError(err, req, res);
           if (!res.finished) this.dispatchNotFound(req, res);
         });
         if (isThenable(ret)) {
-          ret.catch(err => res._reject(err));
+          // Through `dispatchError`, not straight to `_reject`: the manual
+          // dispatcher consults the handler Nest registered with
+          // `setErrorHandler()`, and the two paths have to render an escaped
+          // error the same way.
+          ret.catch(err => this.dispatchError(err, req, res));
         }
       } catch (e) {
-        res._reject(e);
+        this.dispatchError(e, req, res);
       }
     });
   }
@@ -708,7 +723,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       const res = makeBunResponse(this, req, resolve, server);
       let idx = 0;
       const step = (err?: unknown) => {
-        if (err) return res._reject(err);
+        if (err) return this.dispatchError(err, req, res);
         if (res.finished) return;
         if (idx >= handlers.length) {
           return this.dispatchNotFound(req, res);

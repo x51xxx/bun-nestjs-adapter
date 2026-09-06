@@ -197,13 +197,19 @@ export function makeBunResponse(
       }
 
       const parts = [`${encodeURIComponent(name)}=${encodeURIComponent(val)}`];
+      // Express derives `Expires` from `maxAge` and lets it *replace* an
+      // explicit `expires` (verified against @nestjs/platform-express). Both
+      // attributes go out: `Max-Age` wins wherever it is understood, and
+      // `Expires` covers the clients that ignore it.
+      let expires = options.expires;
       if (options.maxAge !== undefined) {
         parts.push(`Max-Age=${Math.floor(options.maxAge / 1000)}`);
+        expires = new Date(Date.now() + options.maxAge);
       }
       if (options.domain) parts.push(`Domain=${options.domain}`);
       if (options.path) parts.push(`Path=${options.path}`);
       else parts.push('Path=/');
-      if (options.expires) parts.push(`Expires=${options.expires.toUTCString()}`);
+      if (expires) parts.push(`Expires=${expires.toUTCString()}`);
       if (options.httpOnly) parts.push('HttpOnly');
       if (options.secure) parts.push('Secure');
       if (options.sameSite) {
