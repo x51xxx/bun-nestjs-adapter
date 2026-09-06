@@ -103,19 +103,19 @@ export function makeBunResponse(
     _disableIdleTimeout: disableIdleTimeout,
     _reject(err: unknown) {
       // Already streaming: the status line and headers are on the wire, so a
-      // 500 body is no longer possible. Erroring the controller is what keeps
-      // this from hanging — it settles the request instead of leaving the
-      // per-request promise pending forever, which is the whole point.
+      // 500 body is no longer possible. Erroring the controller does two
+      // things, and both are wanted: it settles the request rather than leaving
+      // the per-request promise pending forever, and it aborts the chunked
+      // response — no terminating chunk, the socket closes with an error, the
+      // client's `fetch` rejects. Measured on Bun 1.4.0 and 1.4.2.
       //
-      // What it does NOT do, contrary to what this comment used to claim, is
-      // tell the client anything. Measured on Bun 1.4.0 (AUDIT.md H6): after
-      // `.error()` Bun still finishes the response cleanly — a small body comes
-      // back as `200` with a matching `Content-Length`, and a flushed chunked
-      // one gets its terminating `0\r\n\r\n`. A truncated payload is therefore
-      // indistinguishable from a complete one on the wire, and there is no
-      // socket handle reachable from a `Response(stream)` body to abort with.
-      // A handler that can fail mid-stream has to signal that in-band (for
-      // `@Sse()`, a terminal `event: error` frame before it throws).
+      // A handler that throws mid-stream rarely reaches here, though: Nest's
+      // `BaseExceptionFilter` sees `isHeadersSent()` and calls
+      // `httpAdapter.end()` instead, which closes the stream cleanly and makes
+      // that failure indistinguishable from success. That is Nest's contract
+      // rather than ours — @nestjs/platform-express produces byte-identical
+      // output — so it is deliberately left alone. AUDIT.md H6 has the
+      // measurements.
       if (state.streamCtrl) {
         this.finished = true;
         try {

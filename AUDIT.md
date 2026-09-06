@@ -531,7 +531,7 @@ one-argument form therefore needs its parameter annotated
 infers normally. Verified with `tsc --noImplicitAny` over every documented
 shape.
 
-### H6 — a handler that throws after `res.write()` is indistinguishable from success **[confirmed]** · corrects H1a
+### H6 — a handler that throws after `res.write()` is indistinguishable from success **[confirmed]** · ~~corrects H1a~~ · **WITHDRAWN**
 
 H1a's fix stopped the hang. But the rationale recorded for it — "erroring the
 stream aborts the chunked response, which is the only way left to tell the
@@ -559,18 +559,64 @@ The client sees a well-formed, complete `200`. A truncated payload is accepted
 as final. There is no socket handle reachable from a `Response(stream)` body,
 so the adapter cannot abort the connection itself.
 
-**Next step:** re-run the probe on Bun **1.4.2** — 1.4.1's notes include
-"fixed streaming response body failures" and a fix for handlers whose promises
-never settle. If unchanged, this is an upstream report with the repro above.
+**Next step (done):** re-run the probe on Bun **1.4.2**. Unchanged — see the
+withdrawal note below for where the diagnosis actually landed.
 Until then: (a) correct the misleading comment in `response.ts`, and (b) for
 `@Sse()` specifically, emit a terminal `event: error` frame before erroring the
 controller, which *is* observable by an `EventSource` consumer.
 
-**Partially addressed (2026-09-06):** (a) is done — the comment in `_reject()`
-now states what `.error()` actually buys (it settles the request instead of
-hanging it) and what it does not (the client cannot tell a truncated response
-from a complete one), and points at the in-band workaround. The behaviour itself
-is unchanged and still needs the 1.4.2 re-check.
+> ### Withdrawn — re-measured on Bun 1.4.2, and the diagnosis was wrong twice
+>
+> The *observation* holds: a handler that throws after `res.write()` produces a
+> response byte-identical to a successful one, on 1.4.0 and 1.4.2 alike. The
+> **cause** attributed to it does not.
+>
+> **It is not Bun.** On bare `Bun.serve`, with no Nest and no adapter,
+> `controller.error()` behaves exactly as it should — the chunked response gets
+> no terminating chunk, the socket closes with an error, and `fetch` rejects:
+>
+> ```
+> ### Bun 1.4.2 — bare Bun.serve
+>   controller.error(): "…\r\n\r\n64\r\nA…\r\n64\r\nB…\r\n"        hadError=true
+>   controller.close(): "…\r\n\r\n64\r\nA…\r\n64\r\nB…\r\n0\r\n\r\n"
+>   fetch threw: TypeError
+> ```
+>
+> **It is not the adapter either.** `res._reject()` on a streaming response does
+> the same thing — verified on 1.4.0 *and* 1.4.2, and now pinned by
+> `tests/integration/audit-h6.spec.ts`. The H1a fix works as its comment
+> claimed all along.
+>
+> **The throw simply never reaches `_reject`.** Tracing the response object
+> shows Nest calling `res.end()`: `BaseExceptionFilter` checks
+> `applicationRef.isHeadersSent(res)` and, when the headers are already out,
+> ends the response instead of replying. Our `end()` closes the stream cleanly,
+> hence the clean-looking wire.
+>
+> **And `@nestjs/platform-express` does byte-identically the same:**
+>
+> ```
+> ### platform-express (Node http)
+>   /boom:    "…Transfer-Encoding: chunked\r\n\r\n7\r\npartial\r\n0\r\n\r\n"  hadError=false
+>   /ok:      "…Transfer-Encoding: chunked\r\n\r\n7\r\npartial\r\n0\r\n\r\n"
+>   identical: true
+> ```
+>
+> So this is Nest's defined behaviour for "headers already sent", reproduced
+> faithfully, not a defect in Bun or in this adapter. **No upstream report is
+> warranted, and nothing is left to fix.** An application that can fail
+> mid-stream still has to signal it in-band — for `@Sse()`, a terminal
+> `event: error` frame — but that is true on Express too.
+>
+> The `_reject()` comment has now been corrected twice: once away from a claim
+> that was right, and once back. The lesson is the same one this file keeps
+> relearning — the first version reasoned about `.error()` without isolating it,
+> and the "correction" measured the wrong layer. Both would have been settled by
+> the twenty-line bare-`Bun.serve` probe above.
+
+**Bonus from the re-check:** the whole suite passes unchanged on Bun 1.4.2
+(334 pass / 4 skip / 0 fail), which is the evidence the Part 3 recommendation to
+add 1.4.2 to the CI matrix was waiting for.
 
 ### M2 — `enableCors()` still swallows user-defined `OPTIONS` routes **[re-confirmed]** · **FIXED**
 
@@ -961,7 +1007,7 @@ now shares body chunks.
 | ~~1~~ | ~~**H4** SSE dies at 10 s~~ | **FIXED 2026-09-06** |
 | ~~2~~ | ~~**H5** CORS `origin` callback~~ | **FIXED 2026-09-06** |
 | ~~3~~ | ~~**M9** 400 on bad JSON~~ / ~~**M2** preflight gate~~ | **both FIXED 2026-09-06** |
-| 4 | **H6** invisible mid-stream failure | comment corrected; upstream repro still owed on 1.4.2 |
+| ~~4~~ | ~~**H6** invisible mid-stream failure~~ | **WITHDRAWN 2026-09-06** — not a defect; platform-express is byte-identical |
 | ~~5~~ | ~~**M8** static mount chaining~~ / ~~**M7** decode~~ | **both FIXED 2026-09-06** |
 | 6 | **L9 / L10 / L11 / L13** (~~L12~~) | **L12 FIXED 2026-09-06**; the rest are each a handful of lines |
 | 7 | Part 4 opt-ins (`idleTimeout`, `maxRequestBodySize`, `reusePort`, compression) | feature work, not defects |
