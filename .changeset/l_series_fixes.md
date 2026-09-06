@@ -26,3 +26,9 @@ Nine small fixes from the L-series of the 2026-09-06 audit.
   outside 1000/1001/1005 — previously nothing could ever emit that event.
 - Dead code removed: `CompiledRoute.isMiddleware`, the unreachable `'USE'`
   branch in route matching, and `ServerEntry.serverEmitter`.
+- **Route matching on the manual dispatcher** keeps a bucket per HTTP verb
+  instead of testing every compiled route in the application against every
+  request — about a third faster on a 201-route app.
+- **`@All()` and `@Get()` on the same path** now run in the order they were
+  declared on the native-routes path too. It ran every method-specific handler
+  before every `@All()` one, disagreeing with the manual dispatcher.

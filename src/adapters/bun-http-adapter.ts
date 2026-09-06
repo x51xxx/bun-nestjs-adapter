@@ -216,15 +216,20 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       // ALL handlers are invoked for any method that has no explicit entry.
       const allHandlers = methodMap.get('ALL');
       if (allHandlers && allHandlers.length) {
-        // Collapse ALL into the wildcard form Bun expects (default route).
+        // Collapse ALL into the wildcard form Bun expects (default route), and
+        // rebuild the chain in *registration* order. Concatenating
+        // `[...methodSpecific, ...allHandlers]`, as this used to, ran every
+        // `@Get()` before every `@All()` on the same path no matter how they
+        // were declared — while the manual dispatcher interleaved them
+        // correctly, so the two disagreed. Memoised per verb; `reloadRoutes()`
+        // rebuilds this closure whenever a route is added.
+        const queues = new Map<string, BunRouteHandler[]>();
         out[bunPath] = (req, server) => {
-          // Try method-specific first when present (Bun won't dispatch them
-          // because we register the same path twice — instead we attach all
-          // logic here).
-          const methodSpecific = methodMap.get(req.method);
-          const queue = methodSpecific
-            ? [...methodSpecific, ...allHandlers]
-            : allHandlers;
+          let queue = queues.get(req.method);
+          if (queue === undefined) {
+            queue = this.router.orderedHandlers(path, req.method);
+            queues.set(req.method, queue);
+          }
           return this.runBunRouteChain(req, queue, server);
         };
       } else if (Object.keys(methodHandler).length > 0) {

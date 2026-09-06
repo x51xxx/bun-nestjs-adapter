@@ -344,7 +344,7 @@ Same freeze-at-boot class as the documented lazy-route limitation.
   `router.middleware`).
 * `res.body` is written on every reply path but only ever read by tests.
 
-## L7 — Slow-path routing is O(routes) per request
+## L7 — Slow-path routing is O(routes) per request · **FIXED**
 
 `matchAll()` (`router.ts:56`) runs every compiled regex against every request. The
 fast path uses Bun's native matcher, so this only bites apps that use middleware —
@@ -983,9 +983,9 @@ would close the gap mechanically.
 
 ## L-series — what shipped, 2026-09-06
 
-Nine of the ten. **L7** (O(routes) matching) is the exception and is handled
-separately; every behaviour below that has an Express counterpart was read off a
-real `@nestjs/platform-express` app before it was written.
+All ten, L7 in a second commit. Every behaviour below that has an Express
+counterpart was read off a real `@nestjs/platform-express` app before it was
+written.
 
 * **L2** — `compilePath()` now tokenises a segment that mixes params with
   literals: `/x/:a-:b`, `/v:major.:minor`. Groups are greedy, which is what
@@ -1022,3 +1022,46 @@ real `@nestjs/platform-express` app before it was written.
   same `dispatchError()` the manual dispatcher uses. Two bugs, not one: the
   fast path went straight to `_reject`, *and* `invokeSingle`'s `next` ignored
   its error argument entirely, turning `next(err)` into a 404.
+
+### L7, and the bug its test found
+
+`BunRouterInstance` keeps a bucket per verb plus one for `ALL`, and `collect()`
+walks the verb's bucket and the `ALL` bucket together with two cursors instead
+of scanning every compiled route in the application. Each bucket is already in
+registration order, so the merge needs no sort — routes carry an `order` index
+for the comparison. Measured on a 201-route app spread over seven verbs:
+**629 → 422 ns per `matchAll()`**, about a third off. It only ever mattered on
+the manual dispatcher, which is what the finding said.
+
+The merge is the whole risk — candidates have to come back in *registration*
+order, because that is the order the chain runs them in — so the test for it
+registers `get / all / get / all` on one path and asserts the chain sees exactly
+that.
+
+**That test failed on the native-routes path, for an unrelated reason.** N4,
+below, and it is now fixed with L7 because there was no way to land the test
+without it.
+
+### N4 — the native map ran every `@Get()` before every `@All()` **[confirmed]** · **FIXED**
+
+`buildBunRoutes()` collapses a path that has an `ALL` handler into a single
+function route and rebuilds the chain itself. It built it as
+`[...methodSpecific, ...allHandlers]` — every method-specific handler first,
+then every `ALL` handler — regardless of how they were declared. The manual
+dispatcher interleaved them correctly, so the two dispatchers disagreed:
+
+```ts
+adapter.get('/chain', a); adapter.all('/chain', b); adapter.get('/chain', c);
+fetch dispatcher → a, b, c        (Express order)
+native routes    → a, c, b
+```
+
+Fixed by rebuilding the queue from the ordered route list
+(`BunRouterInstance.orderedHandlers()`), memoised per verb inside the route
+closure — `reloadRoutes()` rebuilds it whenever a route is added. `byPath`
+groups by method and so cannot carry the cross-method order; the `order` index
+added for L7 is what makes this cheap.
+
+This is the fast-path/slow-path divergence class the 2026-07-26 audit called
+"the worst kind to debug", and it survived two audits because nothing had ever
+registered `@All()` and `@Get()` on the same path in a test.

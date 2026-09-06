@@ -6,6 +6,12 @@ export interface CompiledRoute {
   regexp: RegExp;
   keys: { name: string }[];
   handler: BunRouteHandler;
+  /**
+   * Registration index. `matchAll()` returns candidates in registration order
+   * across methods, and the per-method buckets it merges are each ordered on
+   * their own — this is what lets them be merged without re-sorting.
+   */
+  order: number;
 }
 
 export class BunRouterInstance {
@@ -19,11 +25,35 @@ export class BunRouterInstance {
    * Bun.serve `routes:` config — built once on listen().
    */
   public readonly byPath: Map<string, Map<string, BunRouteHandler[]>> = new Map();
+  /**
+   * `method → routes`, so a request only ever tests the regexes registered for
+   * its own verb. Matching used to run every compiled regex in the application
+   * against every request on the manual dispatcher; an app with 200 routes
+   * spread over the usual verbs now tests a fraction of them.
+   */
+  private readonly byMethod: Map<string, CompiledRoute[]> = new Map();
+  /** `ALL` routes, which are candidates for every verb. Usually empty. */
+  private readonly allMethodRoutes: CompiledRoute[] = [];
 
   add(method: string, path: string, handler: BunRouteHandler) {
     const upper = method.toUpperCase();
     const { regexp, keys } = compilePath(path);
-    this.routes.push({ method: upper, rawPath: path, regexp, keys, handler });
+    const route: CompiledRoute = {
+      method: upper,
+      rawPath: path,
+      regexp,
+      keys,
+      handler,
+      order: this.routes.length,
+    };
+    this.routes.push(route);
+    if (upper === 'ALL') {
+      this.allMethodRoutes.push(route);
+    } else {
+      const bucketForMethod = this.byMethod.get(upper);
+      if (bucketForMethod) bucketForMethod.push(route);
+      else this.byMethod.set(upper, [route]);
+    }
     let bucket = this.byPath.get(path);
     if (!bucket) {
       bucket = new Map();
@@ -53,25 +83,78 @@ export class BunRouterInstance {
     return matches;
   }
 
-  private collect(upper: string, pathname: string) {
-    const matches: { route: CompiledRoute; params: Record<string, string> }[] = [];
-    for (const route of this.routes) {
-      if (route.method !== upper && route.method !== 'ALL') continue;
-      const m = route.regexp.exec(pathname);
-      if (!m) continue;
-      let params: Record<string, string>;
-      if (route.keys.length === 0) {
-        params = EMPTY_PARAMS;
-      } else {
-        params = Object.create(null);
-        for (let i = 0; i < route.keys.length; i++) {
-          const v = m[i + 1];
-          if (v !== undefined) params[route.keys[i].name] = safeDecodeURIComponent(v);
-        }
-      }
-      matches.push({ route, params });
+  /**
+   * Handlers registered for one raw path that apply to `method`, in
+   * registration order — `ALL` and method-specific interleaved exactly as they
+   * were declared. The native route map needs this because it collapses a path
+   * with an `ALL` handler into a single function route and has to rebuild the
+   * chain itself; `byPath` groups by method and so loses the cross-method
+   * order.
+   */
+  orderedHandlers(rawPath: string, method: string): BunRouteHandler[] {
+    const out: BunRouteHandler[] = [];
+    for (let i = 0; i < this.routes.length; i++) {
+      const route = this.routes[i];
+      if (route.rawPath !== rawPath) continue;
+      if (route.method !== method && route.method !== 'ALL') continue;
+      out.push(route.handler);
     }
+    return out;
+  }
+
+  /**
+   * Candidates for one verb, in registration order. The verb's own bucket and
+   * the `ALL` bucket are each already ordered, so they are walked together with
+   * two cursors rather than concatenated and sorted.
+   */
+  private collect(upper: string, pathname: string) {
+    const specific = this.byMethod.get(upper);
+    const all = this.allMethodRoutes;
+    const matches: { route: CompiledRoute; params: Record<string, string> }[] = [];
+
+    if (all.length === 0) {
+      if (specific === undefined) return matches;
+      for (let i = 0; i < specific.length; i++) {
+        this.tryRoute(specific[i], pathname, matches);
+      }
+      return matches;
+    }
+    if (specific === undefined) {
+      for (let i = 0; i < all.length; i++) {
+        this.tryRoute(all[i], pathname, matches);
+      }
+      return matches;
+    }
+    let a = 0;
+    let b = 0;
+    while (a < specific.length && b < all.length) {
+      if (specific[a].order < all[b].order)
+        this.tryRoute(specific[a++], pathname, matches);
+      else this.tryRoute(all[b++], pathname, matches);
+    }
+    while (a < specific.length) this.tryRoute(specific[a++], pathname, matches);
+    while (b < all.length) this.tryRoute(all[b++], pathname, matches);
     return matches;
+  }
+
+  private tryRoute(
+    route: CompiledRoute,
+    pathname: string,
+    out: { route: CompiledRoute; params: Record<string, string> }[],
+  ): void {
+    const m = route.regexp.exec(pathname);
+    if (!m) return;
+    let params: Record<string, string>;
+    if (route.keys.length === 0) {
+      params = EMPTY_PARAMS;
+    } else {
+      params = Object.create(null);
+      for (let i = 0; i < route.keys.length; i++) {
+        const v = m[i + 1];
+        if (v !== undefined) params[route.keys[i].name] = safeDecodeURIComponent(v);
+      }
+    }
+    out.push({ route, params });
   }
 }
 

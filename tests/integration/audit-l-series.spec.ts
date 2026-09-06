@@ -19,6 +19,7 @@ import type { BunRequest, BunResponse } from '../../src';
 //   L11 `Host: [::1]:1234` → hostname '[::1]'
 //   L13 `close()` waits for Bun's stop() instead of dropping the promise
 //   L14 both dispatchers route a handler error through setErrorHandler()
+//   L7  per-method route buckets, merged so registration order is preserved
 
 let app: { close(): Promise<unknown>; getHttpServer(): any } | null = null;
 
@@ -358,5 +359,63 @@ describe('L4 — an abnormal WebSocket close raises an error', () => {
     await Bun.sleep(120);
     expect(abnormalErrors).toHaveLength(1);
     expect(abnormalErrors[0].message).toContain('3000');
+  });
+});
+
+// ── L7 ──────────────────────────────────────────────────────────────────────
+
+describe('L7 — per-method route index', () => {
+  // The index splits routes into a bucket per verb plus one for `ALL`, and
+  // merges the two on lookup. Merging is the whole risk: candidates must still
+  // come back in *registration* order, because that is the order the chain
+  // runs them in and the order a `next()` fall-through depends on.
+  // Runs on both dispatchers on purpose: the native map collapses a path that
+  // has an `@All()` into one function route and rebuilds the chain itself, and
+  // it used to rebuild it as "every method-specific handler, then every ALL
+  // handler" — a different order from the manual dispatcher's. Found by this
+  // test while merging the buckets; recorded as N4 in AUDIT.md.
+  for (const [label, withMiddleware] of DISPATCHERS) {
+    it(`preserves registration order across ALL and method-specific routes — ${label}`, async () => {
+      const base = await boot(MiscModule, a => {
+        if (withMiddleware) passthrough(a);
+      });
+      const adapter = (app as any).getHttpAdapter();
+      const seen: string[] = [];
+      const step =
+        (tag: string) => (_req: BunRequest, _res: BunResponse, next?: Function) => {
+          seen.push(tag);
+          next?.();
+        };
+
+      adapter.get('/chain', step('get-1'));
+      adapter.all('/chain', step('all-1'));
+      adapter.get('/chain', step('get-2'));
+      adapter.all('/chain', step('all-2'));
+      adapter.get('/chain', (_req: BunRequest, res: BunResponse) => {
+        res.json({ seen });
+      });
+
+      const res = await fetch(`${base}/chain`);
+      expect(await res.json()).toEqual({
+        seen: ['get-1', 'all-1', 'get-2', 'all-2'],
+      });
+    });
+  }
+
+  it('does not offer one verb’s routes to another', async () => {
+    const base = await boot(MiscModule);
+    const adapter = (app as any).getHttpAdapter();
+    adapter.post('/only-post', (_req: BunRequest, res: BunResponse) =>
+      res.json({ ok: 1 }),
+    );
+
+    expect((await fetch(`${base}/only-post`)).status).toBe(404);
+    expect((await fetch(`${base}/only-post`, { method: 'POST' })).status).toBe(200);
+  });
+
+  it('still falls back from HEAD to the GET handlers', async () => {
+    const base = await boot(MiscModule);
+    const res = await fetch(`${base}/ping`, { method: 'HEAD' });
+    expect(res.status).toBe(200);
   });
 });
