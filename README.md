@@ -24,7 +24,15 @@ whenever no middleware/static/CORS feature is active.
   to a Web `ReadableStream` and piped through `Bun.serve`.
 - **Server-Sent Events** (`@Sse()`) — the response carries a Node-`Writable`
   shim and the request bridges `AbortSignal` to `'close'` so Nest's core
-  `RouterResponseController.sse()` works unchanged.
+  `RouterResponseController.sse()` works unchanged. `res.write()` reports
+  backpressure the Node way (`false`, then `'drain'`) on Bun ≥ 1.4, so a slow
+  client no longer makes the body pile up in memory.
+- **Nest 12.1 security and cookies**: `app.useSecurityHeaders()`,
+  `app.enableCsrfProtection()` and the built-in cookie API work, and the
+  security hooks run without leaving Bun's native route map.
+- **Graceful shutdown**: `forceCloseConnections: true` closes open (streaming)
+  connections on `app.close()`; without it, close waits for them, as on
+  express.
 - **File uploads**: `BunFileInterceptor`, `BunFilesInterceptor`,
   `BunAnyFilesInterceptor` — read multipart bodies via the native
   `Request.formData()` and populate `req.file` / `req.files`. Optional
@@ -128,6 +136,24 @@ export class ChatGateway {
 
 Under the hood, `BunHttpAdapter` intercepts WebSocket upgrade requests and upgrades them using Bun's native `server.upgrade` callback, passing client connection data to the ws adapter server instance.
 
+Bun's WebSocket tuning (`perMessageDeflate`, `maxPayloadLength`,
+`backpressureLimit`, `closeOnBackpressureLimit`, `idleTimeout`, `sendPings`,
+`publishToSelf`) applies to a whole server, so it is set where the server is
+created:
+
+```ts
+// gateways on the HTTP port
+const app = await NestFactory.create(AppModule, new BunHttpAdapter({
+  websocket: { perMessageDeflate: true, maxPayloadLength: 1024 * 1024 },
+}));
+// gateways on their own port
+app.useWebSocketAdapter(new BunWsAdapter(app, { websocket: { idleTimeout: 60 } }));
+```
+
+`client.send()` returns Bun's status (bytes sent, `-1` under backpressure —
+wait for the client's `'drain'` event — or `0` if dropped). Since Bun 1.4,
+`publish()` returns a status too, not a delivery count.
+
 ### Dynamic Route Reloading (Lazy Modules)
 
 If you load routes dynamically at runtime (for example, using Nest's `LazyModuleLoader`), `BunHttpAdapter` automatically intercepts new route/middleware additions and calls `server.reload({ routes })` to refresh the native `Bun.serve` routing tables. No manual action or server restart is required.
@@ -204,6 +230,11 @@ bun run test:fixtures      # run our compatibility suite against them
 
 This means every regression in upstream Nest core is automatically picked up
 by our CI. Update with `bun run fixtures:update`.
+
+`bun run test:upstream-e2e` goes one step further for the security and cookie
+features: it runs upstream's own e2e specs (`integration/security`,
+`integration/cookies`) unmodified, with `BunHttpAdapter` standing in for the
+express and fastify adapters.
 
 ## Development
 

@@ -103,6 +103,44 @@ native-Bun WS adapter.
 > `Bun.serve` via the HTTP dispatcher. Only an explicit *different* port opens a
 > second listener.
 
+## Nest 12.1 security hooks: ordering and scope
+
+**Affects:** `app.useSecurityHeaders()` / `app.enableCsrfProtection()`.
+
+The adapter runs these hooks *first* on every HTTP request — before the body
+parser, CORS, static assets and `use()` middleware — on both dispatchers, and
+without leaving Bun's native route map. On express the hook sits wherever the
+first security call registered it. Since Nest requires that call before
+`init()`, it precedes the parser and Nest's middleware there too; the one
+difference is a user `app.use()` made *before* `useSecurityHeaders()`, which
+express runs first and this adapter runs after.
+
+A native static root (`useStaticAssets(root, { native: true })`) is taken off
+Bun's route map while hooks are registered (Bun answers `{ dir }` routes
+without reaching JS), and is served by the `fetch` dispatcher instead.
+
+WebSocket upgrades are not covered — as on express, where HTTP middleware
+doesn't see upgrades either.
+
+## `req.signedCookies` is always present
+
+**Affects:** `@SignedCookies()` with no `cookies: { secret }`.
+
+Upstream's e2e expects reading signed cookies without a configured secret to
+fail with a 500. The request shim always carries `req.signedCookies` (it behaves
+like express *with* cookie-parser installed), so Nest reads that object and
+returns `null` instead. Kept on purpose — code reading `req.signedCookies.x`
+directly would break otherwise. `bun run test:upstream-e2e` filters exactly this
+case out.
+
+## Response backpressure needs Bun ≥ 1.4
+
+`res.write()` returns `false` and emits `'drain'` only when Bun reads the body
+as the socket drains, which it does from 1.4.0. On 1.3.x Bun pulls eagerly, so
+the shim never reports pressure (it stays correct, just unbounded). It bounds
+the transport, not the producer: Nest's SSE uses `concatMap`, so a *hot*
+Observable that emits faster than the client reads still queues in RxJS.
+
 ## How to verify when re-enabling
 
 Drop `.skip` from the relevant `describe.skip` and run

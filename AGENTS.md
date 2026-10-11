@@ -59,6 +59,7 @@ src/                          # Published source
     optional-engines.d.ts     # minimal types for untyped optional peers (ejs, pug)
     static.ts                 # matchStatic/serveStatic + serveNativeStatic, MIME map
     streaming.ts              # Node Readable → web stream helpers, duck-type guards
+    ws-options.ts             # BunWebSocketOptions (Bun.serve websocket tuning), shared by both adapters
   interceptors/
     bun-file-interceptor.ts   # ~160 LOC — file upload interceptors
     index.ts                  # Re-exports interceptors
@@ -75,6 +76,9 @@ tests/
     uploads.spec.ts           # Multipart file upload interceptors
     websocket.spec.ts         # BunWsAdapter gateway tests
     upstream-fixtures.spec.ts # Compatibility suite against upstream nestjs/nest fixtures
+    nest-12-1-parity.spec.ts  # Nest 12.1 parity: media-type versioning, forceCloseConnections, security hooks, cookies
+    backpressure.spec.ts      # res.write() → false / 'drain' / 'close' on client exit (Bun ≥ 1.4)
+    websocket-options.spec.ts # BunHttpAdapter/BunWsAdapter `websocket` tuning, client.send() status
     audit-fixes.spec.ts       # Regression / audit tests
     refactor-fixes.spec.ts    # Regression tests for src/http decomposition fixes
     https.spec.ts             # httpsOptions → Bun.serve TLS (self-signed cert in fixtures/own/tls)
