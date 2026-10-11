@@ -63,6 +63,10 @@ export function parseCookies(
     const idx = pair.indexOf('=');
     if (idx === -1) continue;
     const key = safeDecodeURIComponent(pair.slice(0, idx).trim());
+    // A repeated name keeps its first value, as `cookie.parse` (cookie-parser,
+    // and Nest's own parser since 12.1) does — the most specific cookie comes
+    // first in the header.
+    if (key in cookies || key in signedCookies) continue;
     const val = safeDecodeURIComponent(pair.slice(idx + 1).trim());
 
     if (secret && val.startsWith('s:')) {

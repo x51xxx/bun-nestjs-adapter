@@ -19,6 +19,30 @@ function neutralAllowed(version: VersionValue): boolean {
 }
 
 /**
+ * Pull the version out of an `Accept` header for MEDIA_TYPE versioning — a
+ * port of upstream's `getMediaTypeVersion` (express/fastify). Every media range
+ * and every `;` parameter is scanned, so `application/json;q=0.9;v=2` and
+ * `text/html, application/json;v=2` both yield `2`, where taking only the
+ * first parameter of the whole header missed them.
+ */
+export function getMediaTypeVersion(
+  acceptHeader: string | string[] | undefined,
+  key: string,
+): string | undefined {
+  const values = acceptHeader === undefined ? [] : ([] as string[]).concat(acceptHeader);
+  for (const value of values) {
+    for (const mediaRange of value.split(',')) {
+      const parameters = mediaRange.split(';');
+      for (let i = 1; i < parameters.length; i++) {
+        const parameter = parameters[i].trim();
+        if (parameter.startsWith(key)) return parameter.slice(key.length);
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
  * Wrap a route handler so it only fires when the request carries a matching
  * version (HEADER / MEDIA_TYPE / CUSTOM extractors); otherwise `next()` moves
  * on to the next version candidate registered for the same path.
@@ -62,14 +86,12 @@ export function applyVersionFilter(
   if (versioningOptions.type === VersioningType.MEDIA_TYPE) {
     const { key } = versioningOptions;
     return (req, res, next) => {
-      const accept = req.headers['accept'];
-      const versionParam = accept ? accept.split(';')[1] : undefined;
-      if (versionParam === undefined) {
+      const headerVersion = getMediaTypeVersion(req.headers['accept'], key);
+      if (headerVersion === undefined) {
         if (neutralAllowed(version)) {
           return handler(req, res, next);
         }
       } else {
-        const headerVersion = versionParam.split(key)[1];
         if (matchesVersion(version, headerVersion)) {
           return handler(req, res, next);
         }
