@@ -59,7 +59,18 @@ interface ResponseState {
    * which is exactly what an `@Sse()` route reached over HEAD did.
    */
   discarded: boolean;
+  /** `write()` returned `false`; the next `pull()` owes the producer a `'drain'`. */
+  needDrain: boolean;
+  /** The client went away (Bun cancelled the body stream) before `end()`. */
+  destroyed: boolean;
 }
+
+/**
+ * Byte budget of a streamed body before `write()` reports backpressure. Bun
+ * (1.4+) pulls the body as the socket drains, so the queue only grows past this
+ * when the client is slower than the producer.
+ */
+const STREAM_HIGH_WATER_MARK = 64 * 1024;
 
 export function makeBunResponse(
   adapter: ResponseAdapter,
@@ -67,7 +78,13 @@ export function makeBunResponse(
   resolve: (r: Response) => void,
   server?: RequestTimeoutSource,
 ): BunResponse {
-  const state: ResponseState = { settled: false, streamCtrl: null, discarded: false };
+  const state: ResponseState = {
+    settled: false,
+    streamCtrl: null,
+    discarded: false,
+    needDrain: false,
+    destroyed: false,
+  };
   /**
    * `Bun.serve` closes a connection after `idleTimeout` seconds without
    * traffic — 10 by default, and the option is capped at 255, so raising it
@@ -257,6 +274,7 @@ export interface NodeWritableShim {
   flushHeaders(): unknown;
   setHeader(name: string, value: string | string[] | number): unknown;
   getHeader(name: string): string | string[] | undefined;
+  getHeaders(): Record<string, string | string[]>;
   removeHeader(name: string): void;
   readonly writableEnded: boolean;
   readonly destroyed: boolean;
@@ -285,9 +303,17 @@ function attachWritableShim(
   disableIdleTimeout: () => void,
 ): void {
   const emitter = new EventEmitter();
+  let closeEmitted = false;
+  const emitClose = () => {
+    if (closeEmitted) return;
+    closeEmitted = true;
+    emitter.emit('close');
+  };
 
   const ensureStreaming = () => {
-    if (state.streamCtrl || state.discarded) return;
+    // `destroyed`: the client is gone and `cancel()` cleared the controller —
+    // a late write must not open a second stream and settle again.
+    if (state.streamCtrl || state.discarded || state.destroyed) return;
     // HEAD must not carry a body. Since `HEAD` falls back to the `GET` handler,
     // a streaming route (SSE, StreamableFile) would otherwise hand Bun a stream
     // it never reads — the source keeps producing into a buffer nobody drains
@@ -311,11 +337,30 @@ function attachWritableShim(
     disableIdleTimeout();
     // `start` runs synchronously inside the constructor, so `state.streamCtrl`
     // is populated before we settle — `_reject` can rely on it immediately.
-    const stream = new ReadableStream<Uint8Array>({
-      start(c) {
-        state.streamCtrl = c;
+    // `pull` runs whenever Bun has taken the queue below the high-water mark,
+    // which is exactly when a producer told to back off may resume. It never
+    // enqueues itself — the producer does, through `write()`.
+    const stream = new ReadableStream<Uint8Array>(
+      {
+        start(c) {
+          state.streamCtrl = c;
+        },
+        pull() {
+          if (!state.needDrain) return;
+          state.needDrain = false;
+          emitter.emit('drain');
+        },
+        cancel() {
+          // The client is gone. Node's `res` reports that as 'close' with
+          // `destroyed` set and no 'finish'; producers stop on either.
+          state.streamCtrl = null;
+          state.needDrain = false;
+          state.destroyed = true;
+          emitClose();
+        },
       },
-    });
+      new ByteLengthQueuingStrategy({ highWaterMark: STREAM_HIGH_WATER_MARK }),
+    );
     res.headersSent = true;
     settle(new Response(stream, toResponseInit(res.headers, res.statusCode || 200)));
   };
@@ -330,6 +375,11 @@ function attachWritableShim(
       callback?.(new Error('write after end'));
       return false;
     }
+    if (state.destroyed) {
+      const err = new Error('write after the response was destroyed');
+      if (callback) queueMicrotask(() => callback(err));
+      return false;
+    }
     ensureStreaming();
     if (state.discarded) {
       // HEAD: report success so the producer doesn't treat it as a write
@@ -337,14 +387,24 @@ function attachWritableShim(
       callback?.();
       return true;
     }
+    const ctrl = state.streamCtrl;
+    if (!ctrl) {
+      // Errored by `_reject` (which also sets `finished`): nowhere to write.
+      callback?.(new Error('write after the response was destroyed'));
+      return false;
+    }
     try {
-      state.streamCtrl!.enqueue(toBytes(chunk));
+      ctrl.enqueue(toBytes(chunk));
     } catch (err) {
       callback?.(err as Error);
       return false;
     }
-    callback?.();
-    return true;
+    // Node runs write callbacks asynchronously; a producer that recurses from
+    // the callback must not grow the stack per chunk.
+    if (callback) queueMicrotask(() => callback());
+    if ((ctrl.desiredSize ?? 1) > 0) return true;
+    state.needDrain = true;
+    return false;
   };
 
   r.end = ((
@@ -360,6 +420,13 @@ function attachWritableShim(
       callback = encodingOrCb;
     }
     if (r.finished) {
+      callback?.();
+      return r;
+    }
+    if (state.destroyed) {
+      // Node: `end()` on a destroyed response settles nothing and emits no
+      // 'finish' — 'close' has already fired.
+      r.finished = true;
       callback?.();
       return r;
     }
@@ -386,7 +453,7 @@ function attachWritableShim(
     r.finished = true;
     r.headersSent = true;
     emitter.emit('finish');
-    emitter.emit('close');
+    emitClose();
     callback?.();
     return r;
   }) as BunResponse['end'] & NodeWritableShim['end'];
@@ -418,6 +485,9 @@ function attachWritableShim(
   r.getHeader = name => {
     return r.headers[String(name).toLowerCase()];
   };
+  // Node's `res.getHeaders()` — a copy, so callers can't mutate ours. Nest's
+  // SseStream reads it to carry handler-set headers onto the event stream.
+  r.getHeaders = () => ({ ...r.headers });
   r.removeHeader = name => {
     delete r.headers[String(name).toLowerCase()];
   };
@@ -430,7 +500,7 @@ function attachWritableShim(
   });
   Object.defineProperty(r, 'destroyed', {
     get() {
-      return r.finished;
+      return r.finished || state.destroyed;
     },
     configurable: true,
   });

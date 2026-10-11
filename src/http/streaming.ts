@@ -24,19 +24,32 @@ export function isNodeReadable(value: object): value is Readable {
   return typeof candidate.pipe === 'function' && typeof candidate.read === 'function';
 }
 
+/**
+ * Fallback for when `Readable.toWeb` is unavailable or throws. Flow-controlled
+ * like it: the source is paused once the queue holds a high-water mark of
+ * bytes and resumed from `pull()`, so a slow client doesn't make the whole
+ * source pile up in memory.
+ */
 export function nodeReadableToWeb(nodeStream: Readable): ReadableStream {
-  return new ReadableStream({
-    start(controller) {
-      nodeStream.on('data', (chunk: Uint8Array | string) => {
-        controller.enqueue(chunk instanceof Uint8Array ? chunk : Buffer.from(chunk));
-      });
-      nodeStream.once('end', () => controller.close());
-      nodeStream.once('error', (err: Error) => controller.error(err));
+  return new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        nodeStream.on('data', (chunk: Uint8Array | string) => {
+          controller.enqueue(chunk instanceof Uint8Array ? chunk : Buffer.from(chunk));
+          if ((controller.desiredSize ?? 1) <= 0) nodeStream.pause();
+        });
+        nodeStream.once('end', () => controller.close());
+        nodeStream.once('error', (err: Error) => controller.error(err));
+      },
+      pull() {
+        nodeStream.resume();
+      },
+      cancel() {
+        nodeStream.destroy?.();
+      },
     },
-    cancel() {
-      nodeStream.destroy?.();
-    },
-  });
+    new ByteLengthQueuingStrategy({ highWaterMark: 64 * 1024 }),
+  );
 }
 
 /**
