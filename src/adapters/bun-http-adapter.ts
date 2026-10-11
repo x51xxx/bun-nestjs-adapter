@@ -58,6 +58,22 @@ import { renderTemplate } from '../http/views';
 export type { BunRequest, BunResponse, BunResponseHeaders } from '../http/types';
 export type { CorsOptions } from '../http/cors';
 
+/**
+ * A request hook Nest's `useSecurityHeaders()` / `enableCsrfProtection()`
+ * register through `registerSecurityHook()` (Nest ≥ 12.1). Typed locally —
+ * the upstream `SecurityRequestHook` lives in `@nestjs/common/internal`, which
+ * Nest 10/11 don't ship, and the published `.d.ts` must load against them.
+ * It writes headers onto the response and returns the error to reject the
+ * request with, if any.
+ */
+export type BunSecurityHook = (
+  request: BunRequest,
+  response: {
+    setHeader(name: string, value: string): unknown;
+    removeHeader(name: string): unknown;
+  },
+) => Error | undefined | void;
+
 interface ServeStaticOptions {
   root?: string;
   prefix?: string;
@@ -108,6 +124,8 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
   private errorHandler: BunErrorHandler | null = null;
   /** Nest's `forceCloseConnections`: close() drops open connections. */
   private forceCloseConnections = false;
+  /** See `registerSecurityHook()`. Run before anything else touches a request. */
+  private readonly securityHooks: BunSecurityHook[] = [];
   private readonly router = new BunRouterInstance();
   private readonly staticAssets: StaticEntry[] = [];
   private readonly logger = new Logger(BunHttpAdapter.name);
@@ -250,6 +268,10 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     // dispatchers agreeing about who owns the path.
     for (const entry of this.staticAssets) {
       if (!entry.native) continue;
+      // A `{ dir }` route is answered inside Bun without ever reaching JS, so
+      // the security hooks couldn't add their headers. Leave the root off the
+      // map; the `fetch` dispatcher serves it with the same semantics.
+      if (this.securityHooks.length !== 0) continue;
       const dirPath = bunDirRoutePath(entry.prefix);
       if (dirPath in out) continue;
       out[dirPath] = { dir: entry.root };
@@ -321,6 +343,46 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     if (this.httpServer?.listening) {
       this.reloadRoutes();
     }
+  }
+
+  /**
+   * Nest 12.1's base implementation registers the hook through `use()`, and
+   * any `use()` middleware moves every request off Bun's native route map — so
+   * `app.useSecurityHeaders()` alone would cost the fast path. Keep the hooks
+   * in their own list instead and run them first on both dispatchers.
+   *
+   * "First" means before the body parser, CORS, static assets and every
+   * `use()` middleware: a cross-site POST is refused before its body is read
+   * (so a malformed JSON body can't turn the 403 into a 400), and the headers
+   * are on every response — 404s, errors and static files included. Nest
+   * requires the call before `init()`, so on express the hook likewise
+   * precedes the parser and Nest's own middleware; the one difference is a
+   * user `app.use()` made *before* `useSecurityHeaders()`, which express runs
+   * first and we run after. WebSocket upgrades are not covered, as on express.
+   */
+  public registerSecurityHook(hook: BunSecurityHook) {
+    this.securityHooks.push(hook);
+    if (this.httpServer?.listening) {
+      this.reloadRoutes();
+    }
+    return this;
+  }
+
+  /** Run the security hooks; `false` once one rejected and the error was dispatched. */
+  private runSecurityHooks(req: BunRequest, res: BunResponse): boolean {
+    for (const hook of this.securityHooks) {
+      let err: unknown;
+      try {
+        err = hook(req, res as unknown as Parameters<BunSecurityHook>[1]);
+      } catch (e) {
+        err = e;
+      }
+      if (err) {
+        this.dispatchError(err, req, res);
+        return false;
+      }
+    }
+    return true;
   }
 
   private registerRoute(method: string, args: unknown[]) {
@@ -675,6 +737,9 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       return undefined;
     }
     const req = buildNativeRouteRequest(bunReq, this.shimCtx, server);
+    if (this.securityHooks.length !== 0) {
+      return this.runSecuredRoute(req, bunReq, [handler], server);
+    }
     const m = req.method;
     // Hot path: GET/HEAD without body parser — skip the async wrapper entirely.
     if (m === 'GET' || m === 'HEAD' || !this.shimCtx.bodyParserEnabled) {
@@ -729,29 +794,64 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       return undefined;
     }
     const req = buildNativeRouteRequest(bunReq, this.shimCtx, server);
+    if (this.securityHooks.length !== 0) {
+      return this.runSecuredRoute(req, bunReq, handlers, server);
+    }
     await maybeParseBody(req, bunReq, this.shimCtx);
     if (req.bodyParseError) return this.settleBodyParseError(req, server);
     return new Promise<Response>(resolve => {
       const res = makeBunResponse(this, req, resolve, server);
-      let idx = 0;
-      const step = (err?: unknown) => {
-        if (err) return this.dispatchError(err, req, res);
-        if (res.finished) return;
-        if (idx >= handlers.length) {
-          return this.dispatchNotFound(req, res);
-        }
-        const h = handlers[idx++];
-        try {
-          const ret = h(req, res, step);
-          if (isThenable(ret)) {
-            ret.catch(step);
-          }
-        } catch (e) {
-          step(e);
-        }
-      };
-      step();
+      this.runHandlers(handlers, req, res);
     });
+  }
+
+  /**
+   * Native route with security hooks registered: the response exists before
+   * the body is parsed, so the hooks run — and may reject — first.
+   */
+  private runSecuredRoute(
+    req: BunRequest,
+    bunReq: Request,
+    handlers: BunRouteHandler[],
+    server?: BunServer,
+  ): Promise<Response> {
+    return new Promise<Response>(resolve => {
+      const res = makeBunResponse(this, req, resolve, server);
+      if (!this.runSecurityHooks(req, res)) return;
+      maybeParseBody(req, bunReq, this.shimCtx).then(
+        () =>
+          req.bodyParseError
+            ? this.dispatchError(
+                new BadRequestException(req.bodyParseError.message),
+                req,
+                res,
+              )
+            : this.runHandlers(handlers, req, res),
+        err => this.dispatchError(err, req, res),
+      );
+    });
+  }
+
+  /** Call route handlers in order, `next()` moving to the next; 404 when exhausted. */
+  private runHandlers(handlers: BunRouteHandler[], req: BunRequest, res: BunResponse) {
+    let idx = 0;
+    const step = (err?: unknown) => {
+      if (err) return this.dispatchError(err, req, res);
+      if (res.finished) return;
+      if (idx >= handlers.length) {
+        return this.dispatchNotFound(req, res);
+      }
+      const h = handlers[idx++];
+      try {
+        const ret = h(req, res, step);
+        if (isThenable(ret)) {
+          ret.catch(step);
+        }
+      } catch (e) {
+        step(e);
+      }
+    };
+    step();
   }
 
   // ---------- runtime fetch dispatcher ----------
@@ -795,6 +895,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
           ? '/' + rawUrl.slice(queryStart)
           : '/';
 
+    const secured = this.securityHooks.length !== 0;
     const req = await buildFetchRequest(
       rawReq,
       pathname,
@@ -803,71 +904,83 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       queryStart,
       this.shimCtx,
       bunServer,
+      // With security hooks the body waits until they have passed — see
+      // `registerSecurityHook()`.
+      !secured,
     );
 
     return new Promise<Response>(resolve => {
       const res = makeBunResponse(this, req, resolve, bunServer);
-
-      if (this.corsOptions) {
-        // Every `OPTIONS` counts as a preflight — that is what `cors` (which
-        // @nestjs/platform-express uses) and `@fastify/cors` both do; neither
-        // sniffs `Access-Control-Request-Method` by default. The documented way
-        // to let your own `@Options()` handler run is `preflightContinue`,
-        // which applies the preflight headers and then falls through to normal
-        // routing.
-        const isPreflight = req.method === 'OPTIONS';
-        applyCorsHeaders(req, res, this.corsOptions, isPreflight);
-        if (isPreflight && this.corsOptions.preflightContinue !== true) {
-          res.statusCode = this.corsOptions.optionsSuccessStatus ?? 204;
-          // `cors` sets this because Safari hangs on a bodyless preflight
-          // without it. Measured on Bun 1.4.0: Bun drops the header on a 204
-          // (where the RFC forbids it) and keeps it on the 2xx an app picks via
-          // `optionsSuccessStatus` — which is the case the workaround is for.
-          res.headers['content-length'] = '0';
-          return this.end(res);
-        }
-      }
-
-      if (req.bodyParseError) {
-        return this.dispatchError(
-          new BadRequestException(req.bodyParseError.message),
-          req,
-          res,
-        );
-      }
-
-      // 1. static assets.
-      //
-      // *Classic* roots are checked before route dispatch and only for
-      // GET/HEAD. A miss inside serveStatic (file not found / directory) moves
-      // on to the next mount that covers the path, and only when they are all
-      // exhausted does route dispatch run — `serve-static` chains through
-      // `next()` the same way, so two roots on one prefix both get a turn.
-      //
-      // A *native* root is the mirror image, because that is what Bun's
-      // `{ dir }` route does on the hot path: the route map is consulted
-      // first (Bun prefers the more specific pattern over `/prefix/*`), the
-      // directory answers only what is left, and its miss is a hard 404. So
-      // it is carried past dispatch and consumed there instead.
-      if (this.staticAssets.length === 0) {
-        return this.dispatchRoutes(req, res, pathname);
-      }
-
-      const classic: StaticMatch[] = [];
-      let native: StaticMatch | null = null;
-      for (const match of matchStatic(this.staticAssets, pathname)) {
-        if (match.entry.native) {
-          if (native === null) native = match;
-        } else {
-          classic.push(match);
-        }
-      }
-
-      if (classic.length !== 0 && (req.method === 'GET' || req.method === 'HEAD')) {
-        return this.serveStaticChain(classic, 0, req, res, pathname, native);
-      }
-      this.dispatchRoutes(req, res, pathname, native);
+      if (!secured) return this.dispatchRequest(req, res, pathname);
+      if (!this.runSecurityHooks(req, res)) return;
+      maybeParseBody(req, rawReq, this.shimCtx).then(
+        () => this.dispatchRequest(req, res, pathname),
+        err => this.dispatchError(err, req, res),
+      );
     });
+  }
+
+  /** CORS, body-parser rejection, static assets, then routes — the `fetch` path. */
+  private dispatchRequest(req: BunRequest, res: BunResponse, pathname: string) {
+    if (this.corsOptions) {
+      // Every `OPTIONS` counts as a preflight — that is what `cors` (which
+      // @nestjs/platform-express uses) and `@fastify/cors` both do; neither
+      // sniffs `Access-Control-Request-Method` by default. The documented way
+      // to let your own `@Options()` handler run is `preflightContinue`,
+      // which applies the preflight headers and then falls through to normal
+      // routing.
+      const isPreflight = req.method === 'OPTIONS';
+      applyCorsHeaders(req, res, this.corsOptions, isPreflight);
+      if (isPreflight && this.corsOptions.preflightContinue !== true) {
+        res.statusCode = this.corsOptions.optionsSuccessStatus ?? 204;
+        // `cors` sets this because Safari hangs on a bodyless preflight
+        // without it. Measured on Bun 1.4.0: Bun drops the header on a 204
+        // (where the RFC forbids it) and keeps it on the 2xx an app picks via
+        // `optionsSuccessStatus` — which is the case the workaround is for.
+        res.headers['content-length'] = '0';
+        return this.end(res);
+      }
+    }
+
+    if (req.bodyParseError) {
+      return this.dispatchError(
+        new BadRequestException(req.bodyParseError.message),
+        req,
+        res,
+      );
+    }
+
+    // 1. static assets.
+    //
+    // *Classic* roots are checked before route dispatch and only for
+    // GET/HEAD. A miss inside serveStatic (file not found / directory) moves
+    // on to the next mount that covers the path, and only when they are all
+    // exhausted does route dispatch run — `serve-static` chains through
+    // `next()` the same way, so two roots on one prefix both get a turn.
+    //
+    // A *native* root is the mirror image, because that is what Bun's
+    // `{ dir }` route does on the hot path: the route map is consulted
+    // first (Bun prefers the more specific pattern over `/prefix/*`), the
+    // directory answers only what is left, and its miss is a hard 404. So
+    // it is carried past dispatch and consumed there instead.
+    if (this.staticAssets.length === 0) {
+      return this.dispatchRoutes(req, res, pathname);
+    }
+
+    const classic: StaticMatch[] = [];
+    let native: StaticMatch | null = null;
+    for (const match of matchStatic(this.staticAssets, pathname)) {
+      if (match.entry.native) {
+        if (native === null) native = match;
+      } else {
+        classic.push(match);
+      }
+    }
+
+    if (classic.length !== 0 && (req.method === 'GET' || req.method === 'HEAD')) {
+      return this.serveStaticChain(classic, 0, req, res, pathname, native);
+    }
+    this.dispatchRoutes(req, res, pathname, native);
   }
 
   /** Try each classic mount in registration order; fall through when all miss. */

@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it } from 'bun:test';
+import { join } from 'path';
 import {
+  Body,
   Controller,
   Get,
   Module,
+  Post,
   Req,
   Sse,
   VERSION_NEUTRAL,
@@ -141,6 +144,88 @@ describe('forceCloseConnections', () => {
     await Bun.sleep(20);
     expect(unsubscribed).toBe(true);
   });
+});
+
+describe('useSecurityHeaders() / enableCsrfProtection() keep the native fast path', () => {
+  @Controller()
+  class ItemsController {
+    @Get('items')
+    list() {
+      return { items: [] };
+    }
+
+    @Post('items')
+    create(@Body() body: unknown) {
+      return { created: true, body };
+    }
+  }
+
+  @Module({ controllers: [ItemsController] })
+  class ItemsModule {}
+
+  const STATIC_ROOT = join(__dirname, 'fixtures', 'own', 'static');
+
+  it('serves controller routes from the native map, with the headers', async () => {
+    const base = await boot(ItemsModule, a => a.useSecurityHeaders());
+    expect(app!.getHttpServer().routes).toBeDefined();
+    expect(Object.keys(app!.getHttpServer().routes)).toContain('/items');
+
+    const res = await fetch(`${base}/items`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(res.headers.get('x-frame-options')).toBe('SAMEORIGIN');
+
+    // The fetch fallback (an unmatched path) gets them too.
+    const miss = await fetch(`${base}/nope`);
+    expect(miss.status).toBe(404);
+    expect(miss.headers.get('x-content-type-options')).toBe('nosniff');
+  });
+
+  // `{ dir }` routes need Bun 1.4.0 (see static-native.spec.ts).
+  const itNative = Bun.semver.satisfies(Bun.version, '>=1.4.0') ? it : it.skip;
+
+  itNative(
+    'runs the hook on a native static root, which leaves the route map',
+    async () => {
+      const base = await boot(ItemsModule, a => {
+        a.useSecurityHeaders();
+        a.useStaticAssets(STATIC_ROOT, { prefix: '/static', native: true });
+      });
+      const routes = app!.getHttpServer().routes;
+      expect(Object.keys(routes).some(k => k.startsWith('/static'))).toBe(false);
+
+      const res = await fetch(`${base}/static/data.json`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    },
+  );
+
+  for (const [name, withMiddleware] of [
+    ['native routes', false],
+    ['fetch dispatcher', true],
+  ] as const) {
+    it(`refuses a cross-site POST before reading its body — ${name}`, async () => {
+      const base = await boot(ItemsModule, a => {
+        if (withMiddleware) a.use((_q: unknown, _s: unknown, next: () => void) => next());
+        a.enableCsrfProtection();
+      });
+      // Malformed JSON: had the parser run first, this would be a 400.
+      const crossSite = await fetch(`${base}/items`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'sec-fetch-site': 'cross-site' },
+        body: '{not json',
+      });
+      expect(crossSite.status).toBe(403);
+
+      const sameOrigin = await fetch(`${base}/items`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+        body: JSON.stringify({ a: 1 }),
+      });
+      expect(sameOrigin.status).toBe(201);
+      expect(await sameOrigin.json()).toEqual({ created: true, body: { a: 1 } });
+    });
+  }
 });
 
 describe('cookies', () => {

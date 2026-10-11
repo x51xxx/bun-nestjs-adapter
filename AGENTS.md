@@ -132,6 +132,7 @@ bun run build            # tsup → dist/{index.js, index.cjs, index.d.ts, .map}
 bun run test             # bun test --preload ./tests/preload.ts tests/
 bun run test:integration # bun test --preload ./tests/preload.ts tests/integration/
 bun run test:fixtures    # upstream compatibility suite (requires fixtures:install first)
+bun run test:upstream-e2e # upstream's own security + cookies e2e specs, adapter swapped in (Nest >= 12.1)
 
 # Benchmarks
 bun run bench            # single-adapter HTTP: 30 s × 50 connections
@@ -206,6 +207,12 @@ The preload:
 - These load AppModules from the `fixtures/nestjs-nest/` git submodule and boot them with `BunHttpAdapter`.
 - Requires `bun run fixtures:install` first (clones submodule, runs `npm ci --legacy-peer-deps`, builds upstream packages).
 - Some fixture areas are intentionally skipped (see `KNOWN-LIMITATIONS.md`).
+- The submodule is pinned to a **release tag** (currently `v12.1.2`), not master. `fixtures:update` moves it to master; to pin a tag instead, `git checkout <tag>` inside the submodule, `git add fixtures/nestjs-nest` in the parent **before** `fixtures:install` (which runs `git submodule update` and would revert an unstaged checkout).
+
+### Upstream e2e specs (`bun run test:upstream-e2e`)
+- Runs nestjs/nest's `integration/security/e2e` and `integration/cookies/e2e` unmodified; `tests/upstream-e2e/swap-adapter.ts` (a preload) `mock.module`s `@nestjs/platform-express` / `-fastify` to `BunHttpAdapter`.
+- Separate process from `bun run test` on purpose — `mock.module` is process-wide and several audit specs import the real `ExpressAdapter`.
+- Known divergences are excluded by the script's `-t` negative-lookahead pattern (Bun binds `it` per file, so it can't be wrapped); each is explained in the preload and `KNOWN-LIMITATIONS.md`.
 
 ### Coverage
 CI runs with `--coverage --coverage-reporter=lcov --coverage-dir=coverage` and uploads to Codecov. Coverage targets: project 80%, patch 70%.

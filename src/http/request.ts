@@ -419,6 +419,8 @@ export async function buildFetchRequest(
   queryStart: number,
   ctx: RequestShimContext,
   server?: RequestIpSource,
+  /** `false` leaves the body for a later `maybeParseBody()` (security hooks run first). */
+  parseBody = true,
 ): Promise<BunRequest> {
   const method = raw.method;
   const headers = buildHeaders(raw.headers);
@@ -428,7 +430,9 @@ export async function buildFetchRequest(
 
   // Same gate as the native-routes hot path — one function, so the two
   // dispatchers cannot disagree about what counts as a body.
-  const parsed = await resolveRequestBody(raw, method, headers, ctx);
+  const parsed = parseBody
+    ? await resolveRequestBody(raw, method, headers, ctx)
+    : NO_BODY;
   const body = parsed.body;
   const rawBody = parsed.rawBody;
   const bodyParseError = parsed.error;

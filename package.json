@@ -33,6 +33,7 @@
     "test": "bun test --preload ./tests/preload.ts tests/",
     "test:integration": "bun test --preload ./tests/preload.ts tests/integration/",
     "test:fixtures": "bun test --preload ./tests/preload.ts tests/integration/upstream-fixtures.spec.ts",
+    "test:upstream-e2e": "bun test --preload ./tests/preload.ts --preload ./tests/upstream-e2e/swap-adapter.ts -t '^(?!.*should fail loudly when reading signed cookies)' ./fixtures/nestjs-nest/integration/security/e2e ./fixtures/nestjs-nest/integration/cookies/e2e",
     "bench": "bun run tests/bench/bun-bench.ts",
     "bench:quick": "bun run tests/bench/bun-bench.ts --duration 5 --connections 50",
     "bench:rest": "bun run tests/bench/rest-bench-k6.ts",

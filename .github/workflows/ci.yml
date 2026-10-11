@@ -93,6 +93,9 @@ jobs:
       - name: Build nestjs/nest fixtures
         run: bash scripts/fixtures-install.sh
       - run: bun run test:fixtures
+      # nestjs/nest's own security + cookies e2e specs, run unmodified with the
+      # Bun adapter standing in for express/fastify (needs Nest >= 12.1).
+      - run: bun run test:upstream-e2e
 
   bench-smoke:
     name: Bench smoke
