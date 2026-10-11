@@ -2,6 +2,7 @@ import { EventEmitter } from 'events';
 import { promises as fs } from 'fs';
 import type { ServerWebSocket, WebSocketHandler } from 'bun';
 import { BunServer, WsClientShim, WsServerShim, WsUpgradeData } from './types';
+import { BunWebSocketOptions, pickWebSocketOptions } from './ws-options';
 
 /**
  * TLS options forwarded verbatim to `Bun.serve({ tls })`. Mirrors Bun's
@@ -115,6 +116,8 @@ export class BunHttpServer extends EventEmitter {
   public routes: BunNativeRoutes | undefined = undefined;
   /** Optional TLS config (from Nest's `httpsOptions`) applied at listen-time. */
   public tls: BunTlsOptions | undefined = undefined;
+  /** WebSocket tuning for shared-port gateways (server-wide in Bun). */
+  public websocketOptions: BunWebSocketOptions | undefined = undefined;
 
   constructor(private readonly fetchHandler: FetchHandler) {
     super();
@@ -143,6 +146,7 @@ export class BunHttpServer extends EventEmitter {
       const config: BunServeConfig = {
         fetch: this.fetchHandler,
         websocket: {
+          ...pickWebSocketOptions(this.websocketOptions),
           open: (ws: ServerWebSocket<WsUpgradeData>) => {
             const client = ws.data?.client;
             const server = ws.data?.server;
@@ -165,7 +169,9 @@ export class BunHttpServer extends EventEmitter {
               client.__onClose(code, reason);
             }
           },
-          drain: () => {},
+          drain: (ws: ServerWebSocket<WsUpgradeData>) => {
+            ws.data?.client?.__onDrain?.();
+          },
         },
         error: (err: Error) => {
           this.emit('error', err);

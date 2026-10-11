@@ -54,9 +54,20 @@ import {
 } from '../http/types';
 import { applyVersionFilter } from '../http/versioning';
 import { renderTemplate } from '../http/views';
+import type { BunWebSocketOptions } from '../http/ws-options';
 
 export type { BunRequest, BunResponse, BunResponseHeaders } from '../http/types';
 export type { CorsOptions } from '../http/cors';
+export type { BunWebSocketOptions } from '../http/ws-options';
+
+export interface BunHttpAdapterOptions {
+  /**
+   * WebSocket tuning for gateways on the HTTP port (shared-port mode). Bun
+   * applies it to every socket on the server, so it is set here rather than
+   * per gateway; a gateway on its own port takes `BunWsAdapter`'s instead.
+   */
+  websocket?: BunWebSocketOptions;
+}
 
 /**
  * A request hook Nest's `useSecurityHeaders()` / `enableCsrfProtection()`
@@ -137,7 +148,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
     return this.shimCtx.cookieSecret;
   }
 
-  constructor() {
+  constructor(private readonly adapterOptions: BunHttpAdapterOptions = {}) {
     super(undefined);
     this.setInstance(this.router);
   }
@@ -155,6 +166,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
       // silently drop mTLS and TLS-hardening settings.
       server.tls = https;
     }
+    server.websocketOptions = this.adapterOptions.websocket;
     (server as BunHttpServer & { adapter: BunHttpAdapter }).adapter = this;
     this.setHttpServer(server);
   }

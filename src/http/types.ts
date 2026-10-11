@@ -147,6 +147,8 @@ export interface WsClientShim {
   __onMessage(data: string | Buffer): void;
   __onClose(code?: number, reason?: string): void;
   __onError(err: unknown): void;
+  /** Bun's `drain`: the socket's send buffer emptied after backpressure. */
+  __onDrain?(): void;
   /** EventEmitter's, used to avoid emitting `'error'` into the void. */
   listenerCount?(event: string): number;
 }

@@ -7,6 +7,7 @@ import { EMPTY, Observable, fromEvent } from 'rxjs';
 import { filter, first, mergeMap, share, takeUntil } from 'rxjs/operators';
 import { emitAbnormalClose } from '../http/server';
 import { BunServer, WsUpgradeData } from '../http/types';
+import { BunWebSocketOptions, pickWebSocketOptions } from '../http/ws-options';
 
 const CLOSE_EVENT = 'close';
 const ERROR_EVENT = 'error';
@@ -22,6 +23,12 @@ type WsMessageData = string | Buffer | ArrayBuffer | Buffer[];
 type WsMessageParser = (data: WsMessageData) => { event: string; data: unknown } | void;
 type BunWsAdapterOptions = {
   messageParser?: WsMessageParser;
+  /**
+   * WebSocket tuning for gateways on their own port (standalone mode). A
+   * gateway sharing the HTTP port runs on the HTTP server, whose tuning comes
+   * from `new BunHttpAdapter({ websocket })` — Bun applies it server-wide.
+   */
+  websocket?: BunWebSocketOptions;
 };
 
 interface ServerEntry {
@@ -70,9 +77,14 @@ export class BunWsClient extends EventEmitter {
     super();
   }
 
-  send(data: string | Uint8Array | ArrayBuffer) {
-    if (this.readyState !== READY_STATE.OPEN) return;
-    this.bunWs?.send(data as string | Uint8Array);
+  /**
+   * Bun's send status: bytes sent (> 0), `-1` when the message was queued
+   * under backpressure (wait for `'drain'`), `0` when it was dropped — and
+   * `0` if the socket isn't open.
+   */
+  send(data: string | Uint8Array | ArrayBuffer): number {
+    if (this.readyState !== READY_STATE.OPEN) return 0;
+    return this.bunWs?.send(data as string | Uint8Array) ?? 0;
   }
 
   /** Subscribe this socket to a Bun pub/sub topic. */
@@ -88,7 +100,9 @@ export class BunWsClient extends EventEmitter {
   }
   /**
    * Publish to a topic excluding this socket (Bun's per-client publish).
-   * Returns the number of messages actually sent.
+   * Since Bun 1.4 the result is a status, not a delivery count: bytes sent
+   * (> 0), `-1` if any subscriber is under backpressure, `0` if the message
+   * was dropped for some subscriber or there were none.
    */
   publish(topic: string, data: string | Uint8Array): number {
     return this.bunWs?.publish(topic, data) ?? 0;
@@ -112,6 +126,10 @@ export class BunWsClient extends EventEmitter {
     this.readyState = READY_STATE.CLOSED;
     this.emit('close', code, reason);
   }
+  __onDrain() {
+    this.emit('drain');
+  }
+
   __onError(err: unknown) {
     this.emit('error', err);
   }
@@ -178,7 +196,9 @@ const STANDALONE_WEBSOCKET_HANDLERS: WebSocketHandler<WsUpgradeData> = {
     emitAbnormalClose(client, server, code, reason);
     client.__onClose(code, reason);
   },
-  drain: () => {},
+  drain: ws => {
+    ws.data.client?.__onDrain?.();
+  },
 };
 
 /**
@@ -187,12 +207,15 @@ const STANDALONE_WEBSOCKET_HANDLERS: WebSocketHandler<WsUpgradeData> = {
 export class BunWsAdapter extends AbstractWsAdapter<BunWsServer, BunWsClient> {
   private readonly logger = new Logger(BunWsAdapter.name);
   private readonly servers = new Map<number, ServerEntry>();
+  private readonly websocketOptions: BunWebSocketOptions | undefined;
+  private warnedSharedOptions = false;
   private messageParser: WsMessageParser = (data: WsMessageData) =>
     JSON.parse(data.toString());
 
   constructor(appOrHttpServer?: object, options?: BunWsAdapterOptions) {
     super(appOrHttpServer);
     if (options?.messageParser) this.messageParser = options.messageParser;
+    this.websocketOptions = options?.websocket;
   }
 
   public setMessageParser(parser: WsMessageParser) {
@@ -253,6 +276,14 @@ export class BunWsAdapter extends AbstractWsAdapter<BunWsServer, BunWsClient> {
           'BunWsAdapter requires a BunHttpAdapter when sharing the underlying HTTP port.',
         );
       }
+      if (this.websocketOptions && !this.warnedSharedOptions) {
+        this.warnedSharedOptions = true;
+        this.logger.warn(
+          'BunWsAdapter "websocket" options apply to gateways on their own port; ' +
+            'a gateway sharing the HTTP port takes them from ' +
+            'new BunHttpAdapter({ websocket }).',
+        );
+      }
       let server = httpAdapter.wsPaths.get(path);
       if (!server) {
         server = new BunWsServer(path);
@@ -305,7 +336,10 @@ export class BunWsAdapter extends AbstractWsAdapter<BunWsServer, BunWsClient> {
         if (upgraded) return undefined;
         return new Response('Upgrade required', { status: 426 });
       },
-      websocket: STANDALONE_WEBSOCKET_HANDLERS,
+      websocket: {
+        ...pickWebSocketOptions(this.websocketOptions),
+        ...STANDALONE_WEBSOCKET_HANDLERS,
+      },
     };
     // Same boundary cast as BunHttpServer.listen — Bun.serve's overloads
     // don't accept a structurally-built config object.
