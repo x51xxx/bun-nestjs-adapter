@@ -17,19 +17,30 @@ The cause is the **driver integration path, not the adapter**.
 > Apollo reaches the adapter through the Express bridge, and Yoga on the same
 > adapter is far faster than either.
 
-`@nestjs/apollo` selects its integration from `httpAdapter.getType()`, and maps
-`'bun'` onto the Express one:
+`@nestjs/apollo` selects its integration from `httpAdapter.getType()`, and knows
+only `express` and `fastify` — published `@nestjs/apollo@14.0.0` throws
+`No support for current HttpAdapter: bun` for anything else:
 
 ```js
-// @nestjs/apollo/dist/drivers/apollo.driver.js
+// @nestjs/apollo/dist/drivers/apollo.driver.js (14.0.0, unmodified)
 if (platformName === 'express')      await this.registerExpress(apolloOptions);
-else if (platformName === 'bun')     await this.registerExpress(apolloOptions);
 else if (platformName === 'fastify') await this.registerFastify(apolloOptions);
+else throw new Error(`No support for current HttpAdapter: ${platformName}`);
 ```
 
-So Apollo talks to `BunHttpAdapter` through `@as-integrations/express5` against
-our Node-shaped `req`/`res` shims. `fastify` gets a native integration; we share
-`express`'s, plus a shim layer.
+The bench therefore uses a bench-only driver,
+`tests/bench/frameworks/graphql/bun-apollo-driver.ts` (`BunApolloDriver`), that
+sends `bun` to `registerExpress()` and leaves express/fastify on the stock
+dispatch. So Apollo talks to `BunHttpAdapter` through `@as-integrations/express5`
+against our Node-shaped `req`/`res` shims. `fastify` gets a native integration;
+we share `express`'s, plus a shim layer.
+
+> **Correction (2026-10-11).** Earlier revisions of this file showed a `'bun'`
+> branch in the block above as if it were upstream code. It never was: the
+> `graphql-nest-bun` numbers here and in `BENCHMARK.md` up to that date were
+> taken with that branch hand-patched into `node_modules/@nestjs/apollo`. The
+> routing is the same as `BunApolloDriver`'s, so the measurements stand, but a
+> clean install could not reproduce the target — it failed to start.
 
 Evidence that the adapter core is not the bottleneck (Bun 1.4.0-canary, medium,
 k6, 50 VUs × 10s):

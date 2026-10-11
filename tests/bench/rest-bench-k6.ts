@@ -622,12 +622,14 @@ async function main() {
   const tmpDir = mkdtempSync(join(tmpdir(), 'rest-k6-'));
   const targets = args.only ?? [...ALL_TARGETS];
   const results: Partial<Record<Framework, Result>> = {};
+  const failed: Framework[] = [];
   try {
     for (const fw of targets) {
       try {
         results[fw] = await runOne(fw, args, tmpDir);
       } catch (e) {
         console.error(`\n[FAIL] ${fw}:`, e instanceof Error ? e.message : e);
+        failed.push(fw);
       }
     }
   } finally {
@@ -664,6 +666,15 @@ async function main() {
       results,
     };
     await Bun.write(args.jsonOut, JSON.stringify(payload, null, 2));
+  }
+  // A target that never came up used to leave the run green: its result was
+  // simply missing, and the matrix read the gap as `0 RPS, 0 errors`. Fail the
+  // process instead, after the report and JSON for the targets that did run.
+  if (failed.length > 0) {
+    console.error(
+      `\n[FAIL] ${failed.length} target(s) did not complete: ${failed.join(', ')}`,
+    );
+    process.exitCode = 1;
   }
 }
 

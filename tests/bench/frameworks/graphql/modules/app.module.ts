@@ -1,14 +1,15 @@
-import { ApolloDriver, ApolloDriverConfig } from '@nestjs/apollo';
+import type { ApolloDriverConfig } from '@nestjs/apollo';
 import { Module } from '@nestjs/common';
 import { GraphQLModule } from '@nestjs/graphql';
 import { CaslModule } from '@trishchuk/nest-casl';
+import { BunApolloDriver } from '../bun-apollo-driver';
 import { Roles } from '../permissions/todo-item.permissions';
 import { TodoItemModule } from './todo-item.module';
 
 @Module({
   imports: [
     GraphQLModule.forRoot<ApolloDriverConfig>({
-      driver: ApolloDriver,
+      driver: BunApolloDriver,
       autoSchemaFile: true,
       path: '/graphql',
     }),
