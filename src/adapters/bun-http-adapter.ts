@@ -106,6 +106,8 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
   private corsOptions: CorsOptions | null = null;
   private notFoundHandler: BunRouteHandler | null = null;
   private errorHandler: BunErrorHandler | null = null;
+  /** Nest's `forceCloseConnections`: close() drops open connections. */
+  private forceCloseConnections = false;
   private readonly router = new BunRouterInstance();
   private readonly staticAssets: StaticEntry[] = [];
   private readonly logger = new Logger(BunHttpAdapter.name);
@@ -125,6 +127,7 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
   public override async init() {}
 
   public initHttpServer(options: NestApplicationOptions): void {
+    this.forceCloseConnections = options?.forceCloseConnections === true;
     const server = new BunHttpServer((req, bunServer) => this.handle(req, bunServer));
     const https = options?.httpsOptions;
     if (https) {
@@ -257,7 +260,11 @@ export class BunHttpAdapter extends AbstractHttpAdapter<
   public close() {
     return new Promise<void>(resolve => {
       if (!this.httpServer) return resolve();
-      this.httpServer.close(() => resolve());
+      // Without `forceCloseConnections`, Bun's stop() waits for in-flight
+      // responses — an open SSE / streaming response keeps close() pending
+      // until the client leaves, as express does. With it, stop(true) drops
+      // the connections, matching express's tracked-socket teardown.
+      this.httpServer.close(() => resolve(), this.forceCloseConnections);
     });
   }
 
